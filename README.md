@@ -40,46 +40,6 @@ vynex_vpn_client/
 - Фоновый запуск `xray.exe` без черного окна через `subprocess.CREATE_NO_WINDOW`.
 - Корректная остановка Xray при отключении и выходе из приложения.
 
-## Установка
-
-```powershell
-py -3 -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-```
-
-## Запуск
-
-```powershell
-py -3 main.py
-```
-
-## Сборка в EXE
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\build.ps1
-```
-
-После сборки готовый файл будет лежать в `dist\VynexVPNClient.exe`.
-Если нужен собственный значок `exe`, положите файл `icon.ico` в корень проекта перед сборкой.
-
-Логика скрипта такая:
-- если уже активирован `venv`, используется он;
-- иначе используется проектный `.venv`, если он существует;
-- только если их нет, создается изолированный `.build\venv`.
-
-Если нужно очистить прошлые артефакты перед сборкой:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\build.ps1 -Clean
-```
-
-Если нужно принудительно собирать только через отдельный `.build\venv`:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\build.ps1 -ForceIsolated
-```
-
 ## Как использовать
 
 1. Запустите приложение.
