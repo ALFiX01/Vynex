@@ -19,7 +19,7 @@ class XrayHealthChecker:
     def __init__(self) -> None:
         self.session = requests.Session()
         self.session.trust_env = False
-        self.session.headers.update({"User-Agent": "Vynex-VPN-Client/1.0"})
+        self.session.headers.update({"User-Agent": "Vynex-Client/1.0"})
 
     def verify_proxy(
         self,

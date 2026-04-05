@@ -28,7 +28,7 @@ class XrayInstaller:
         self.session.headers.update(
             {
                 "Accept": "application/vnd.github+json",
-                "User-Agent": "Vynex-VPN-Client/1.0",
+                "User-Agent": "Vynex-Client/1.0",
             }
         )
 

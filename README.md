@@ -96,8 +96,8 @@ powershell -ExecutionPolicy Bypass -File .\build.ps1 -ForceIsolated
 - Файлы Xray runtime (`xray.exe`, `geoip.dat`, `geosite.dat`) лежат в `%LOCALAPPDATA%\VynexVPNClient\xray\`.
 - Профили маршрутизации лежат по одному JSON-файлу в `%LOCALAPPDATA%\VynexVPNClient\data\routing_profiles\`.
 - `geoip.dat` и `geosite.dat` скачиваются из каталога `.database`:
-  - `https://raw.githubusercontent.com/ALFiX01/Vynex-VPN/main/.database/geoip.dat`
-  - `https://raw.githubusercontent.com/ALFiX01/Vynex-VPN/main/.database/geosite.dat`
+  - `https://raw.githubusercontent.com/ALFiX01/Vynex/main/.database/geoip.dat`
+  - `https://raw.githubusercontent.com/ALFiX01/Vynex/main/.database/geosite.dat`
 - Профили маршрутизации подтягиваются из:
-  - `https://api.github.com/repos/ALFiX01/Vynex-VPN/contents/.database/routing_profiles`
+  - `https://api.github.com/repos/ALFiX01/Vynex/contents/.database/routing_profiles`
 - Если geo-файлы не удалось скачать, клиент покажет предупреждение при старте.

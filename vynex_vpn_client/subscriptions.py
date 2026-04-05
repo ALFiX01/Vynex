@@ -14,7 +14,7 @@ class SubscriptionManager:
     def __init__(self, storage: JsonStorage) -> None:
         self.storage = storage
         self.session = requests.Session()
-        self.session.headers.update({"User-Agent": "Vynex-VPN-Client/1.0"})
+        self.session.headers.update({"User-Agent": "Vynex-Client/1.0"})
 
     def import_subscription(self, subscription: SubscriptionEntry) -> list[ServerEntry]:
         previous_server_ids = set(subscription.server_ids)

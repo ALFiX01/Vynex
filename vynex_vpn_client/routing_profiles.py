@@ -30,7 +30,7 @@ class RoutingProfile:
 class RoutingProfileManager:
     def __init__(self) -> None:
         self.session = requests.Session()
-        self.session.headers.update({"User-Agent": "Vynex-VPN-Client/1.0"})
+        self.session.headers.update({"User-Agent": "Vynex-Client/1.0"})
         self._ensure_defaults()
 
     def _ensure_defaults(self) -> None:
