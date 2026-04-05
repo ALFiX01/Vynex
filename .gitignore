@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+data/
+xray.exe
+geoip.dat
+geosite.dat
+*.dll
