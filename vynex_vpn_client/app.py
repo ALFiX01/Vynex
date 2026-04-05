@@ -97,13 +97,10 @@ class VynexVpnApp:
         title_markup = f"[bold cyan]{self.logo}[/bold cyan]" if self.logo else f"[bold cyan]{APP_NAME}[/bold cyan]"
         max_content_width = max(20, self.console.width - 2)
         title = Text.from_markup(title_markup)
-        version = Text(f"Версия: v{APP_VERSION}")
         status = Text.from_markup(self._banner_status_line())
-        version.pad_left(1)
         status.pad_left(1)
-        version.truncate(max_content_width, overflow="ellipsis")
         status.truncate(max_content_width, overflow="ellipsis")
-        banner = Group(Text(""), title, version, status)
+        banner = Group(Text(""), title, Text(""), status)
         self.console.print(banner)
 
     def _render_screen(self) -> None:
