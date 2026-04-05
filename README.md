@@ -2,30 +2,6 @@
 
 Консольный CLI/TUI клиент для Windows 10/11, который управляет `xray.exe`, импортирует сервера и подписки, а также запускает Xray-core в режиме `Proxy`.
 
-## Структура проекта
-
-```text
-vynex_vpn_client/
-├── vynex_vpn_client/
-│   ├── app.py
-│   ├── config_builder.py
-│   ├── constants.py
-│   ├── core.py
-│   ├── healthcheck.py
-│   ├── models.py
-│   ├── parsers.py
-│   ├── process_manager.py
-│   ├── storage.py
-│   ├── subscriptions.py
-│   ├── system_proxy.py
-│   └── utils.py
-├── main.py
-├── README.md
-├── build.ps1
-├── requirements.txt
-└── vynex_vpn_client.spec
-```
-
 ## Возможности
 
 - Автоматическая загрузка последнего `Xray-core` для Windows 64-bit через GitHub API.
