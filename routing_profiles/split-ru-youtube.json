@@ -1,0 +1,59 @@
+{
+  "profile_id": "split-ru-youtube",
+  "name": "RU Direct / YouTube Proxy",
+  "description": "RU/private/tor напрямую, YouTube и tunneling-домены через proxy, реклама блокируется.",
+  "rules": [
+    {
+      "type": "field",
+      "domain": [
+        "geosite:yt-ads"
+      ],
+      "outboundTag": "direct"
+    },
+    {
+      "type": "field",
+      "domain": [
+        "geosite:private",
+        "geosite:category-ru",
+        "localhost"
+      ],
+      "outboundTag": "direct"
+    },
+    {
+      "type": "field",
+      "ip": [
+        "geoip:ru",
+        "geoip:private",
+        "geoip:tor",
+        "127.0.0.0/8",
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16"
+      ],
+      "outboundTag": "direct"
+    },
+    {
+      "type": "field",
+      "domain": [
+        "geosite:youtube",
+        "geosite:category-proxy-tunnels",
+        "geosite:0x0"
+      ],
+      "outboundTag": "proxy"
+    },
+    {
+      "type": "field",
+      "ip": [
+        "geoip:cc"
+      ],
+      "outboundTag": "proxy"
+    },
+    {
+      "type": "field",
+      "domain": [
+        "geosite:category-ads"
+      ],
+      "outboundTag": "block"
+    }
+  ]
+}
