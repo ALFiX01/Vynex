@@ -135,12 +135,14 @@ class VynexVpnApp:
         while True:
             servers = self.storage.load_servers()
             subscriptions = self.storage.load_subscriptions()
+            self._render_screen()
             selected_action = self._select(
                 "Управление серверами и подписками",
                 choices=[
                     f"Серверы: {len(servers)}",
                     f"Подписки: {len(subscriptions)}",
                     "Добавить сервер (Ссылка)",
+                    "Удалить сервер",
                     "Добавить подписку (URL)",
                     "Обновить подписки",
                     "Назад",
@@ -155,6 +157,8 @@ class VynexVpnApp:
                 self._show_subscriptions_overview()
             elif selected_action == "Добавить сервер (Ссылка)":
                 self.add_server_flow()
+            elif selected_action == "Удалить сервер":
+                self.delete_server_flow()
             elif selected_action == "Добавить подписку (URL)":
                 self.add_subscription_flow()
             elif selected_action == "Обновить подписки":
@@ -229,6 +233,7 @@ class VynexVpnApp:
             return
         name_width = self._server_name_column_width(servers)
         protocol_width = max((self._display_width(server.protocol.upper()) for server in servers), default=5)
+        self._render_screen()
         selected_server_id = self._select(
             "Выберите сервер",
             choices=[
@@ -237,10 +242,10 @@ class VynexVpnApp:
                     value=server.id,
                 )
                 for server in servers
-            ],
+            ] + [Choice(title="Назад", value="__back__")],
             use_shortcuts=True
         ).ask()
-        if not selected_server_id:
+        if not selected_server_id or selected_server_id == "__back__":
             return
         selected_server = next(server for server in servers if server.id == selected_server_id)
         routing_profile = self._get_active_routing_profile()
@@ -388,12 +393,86 @@ class VynexVpnApp:
             self._show_error("Ошибка парсинга", exc)
             self._pause()
 
+    def delete_server_flow(self) -> None:
+        servers = self.storage.load_servers()
+        if not servers:
+            self._render_screen()
+            self.console.print(Panel.fit("Список серверов пуст.", border_style="yellow"))
+            self._pause()
+            return
+
+        name_width = max((self._display_width(self._ui_server_name(server.name)) for server in servers), default=12)
+        protocol_width = max((self._display_width(server.protocol.upper()) for server in servers), default=5)
+        choices = [
+            Choice(
+                title=(
+                    f"{self._pad_display_width(self._truncate_display_width(self._ui_server_name(server.name), name_width), name_width)}"
+                    f" | {self._pad_display_width(server.protocol.upper(), protocol_width)}"
+                    f" | {server.host}:{server.port}"
+                ),
+                value=server.id,
+            )
+            for server in servers
+        ] + [Choice(title="Назад", value="__back__")]
+
+        self._render_screen()
+        selected_server_id = self._select(
+            "Выберите сервер для удаления",
+            choices=choices,
+            use_shortcuts=True,
+        ).ask()
+        if selected_server_id in (None, "__back__"):
+            return
+
+        server = next((item for item in servers if item.id == selected_server_id), None)
+        if server is None:
+            return
+
+        state = self._current_state()
+        if state.is_running and state.server_id == server.id:
+            self._render_screen()
+            should_disconnect = questionary.confirm(
+                "Этот сервер сейчас активен. Отключить текущее подключение и удалить сервер?",
+                default=True,
+            ).ask()
+            if not should_disconnect:
+                return
+            self._disconnect_runtime(silent=True)
+
+        self._render_screen()
+        should_delete = questionary.confirm(
+            f"Удалить сервер '{self._ui_server_name(server.name)}'?",
+            default=False,
+        ).ask()
+        if not should_delete:
+            return
+
+        deleted_server = self.storage.delete_server(server.id)
+        if deleted_server is None:
+            self._render_screen()
+            self.console.print(Panel.fit("Сервер уже отсутствует в списке.", border_style="yellow"))
+            self._pause()
+            return
+
+        self._render_screen()
+        self.console.print(
+            Panel.fit(
+                f"{self._ui_server_name(deleted_server.name)}\nудален из списка серверов.",
+                title="Сервер удален",
+                border_style="green",
+            )
+        )
+        self._pause()
+
     def add_subscription_flow(self) -> None:
         url = questionary.text("Введите URL подписки").ask()
         if not url:
             return
         default_title = self._subscription_default_title(url)
-        title = questionary.text("Название подписки", default=default_title).ask() or default_title
+        raw_title = questionary.text("Название подписки", default=default_title).ask()
+        if raw_title is None:
+            return
+        title = raw_title or default_title
         subscription = self.storage.get_subscription_by_url(url) or SubscriptionEntry.new(url=url, title=title)
         subscription.title = title
         try:
@@ -422,6 +501,7 @@ class VynexVpnApp:
         while True:
             settings = self._validated_settings(raise_on_error=False)
             active_routing_name = self._active_routing_profile_name()
+            self._render_screen()
             selected_action = self._select(
                 "Настройки",
                 choices=[
@@ -474,6 +554,7 @@ class VynexVpnApp:
 
     def components_flow(self) -> None:
         while True:
+            self._render_screen()
             selected_action = self._select(
                 "Компоненты",
                 choices=[
@@ -572,6 +653,7 @@ class VynexVpnApp:
             if any(profile.profile_id == settings.active_routing_profile_id for profile in profiles)
             else None
         )
+        self._render_screen()
         selected_profile_id = self._select(
             "Выберите набор правил маршрутизации",
             choices=[
@@ -723,7 +805,6 @@ class VynexVpnApp:
         return (
             "[bold]Статус:[/bold] [yellow]Не подключено[/yellow]"
             f" | [bold]Маршрут:[/bold] {routing_name}"
-            f" | [bold]Proxy:[/bold] {proxy_mode}"
         )
 
     def _banner_border_style(self) -> str:
@@ -1036,7 +1117,7 @@ class VynexVpnApp:
         self._render_screen()
         self.console.print(
             Panel.fit(
-                f"{component_name}\nобновлен успешно.",
+                f"{component_name}\nобновлено успешно.",
                 title=title,
                 border_style="green",
             )

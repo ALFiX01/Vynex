@@ -17,17 +17,26 @@ class SubscriptionManager:
         self.session.headers.update({"User-Agent": "Vynex-VPN-Client/1.0"})
 
     def import_subscription(self, subscription: SubscriptionEntry) -> list[ServerEntry]:
+        previous_server_ids = set(subscription.server_ids)
         links = self.fetch_subscription_links(subscription.url)
         imported: list[ServerEntry] = []
+        imported_ids: set[str] = set()
         for link in links:
             try:
                 server = parse_share_link(link, source="subscription", subscription_id=subscription.id)
             except ValueError:
                 continue
-            imported.append(self.storage.upsert_server(server))
+            saved_server = self.storage.upsert_server(server)
+            if saved_server.id in imported_ids:
+                continue
+            imported.append(saved_server)
+            imported_ids.add(saved_server.id)
         if not imported:
             raise ValueError("Не удалось импортировать ни один сервер из подписки.")
         subscription.server_ids = [item.id for item in imported]
+        stale_server_ids = previous_server_ids - imported_ids
+        if stale_server_ids:
+            self.storage.remove_servers_by_ids(stale_server_ids, subscription_id=subscription.id)
         return imported
 
     def refresh_all(self) -> tuple[list[tuple[SubscriptionEntry, int]], list[tuple[SubscriptionEntry, str]]]:

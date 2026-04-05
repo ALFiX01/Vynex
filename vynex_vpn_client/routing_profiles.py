@@ -9,6 +9,8 @@ import requests
 
 from .constants import ROUTING_PROFILES_DIR, ROUTING_PROFILES_RAW_BASE, ROUTING_PROFILES_REPO_API
 
+MANAGED_REMOTE_PROFILES_INDEX = ROUTING_PROFILES_DIR / ".managed_remote_profiles"
+
 
 @dataclass
 class RoutingProfile:
@@ -36,10 +38,13 @@ class RoutingProfileManager:
         synced = self._sync_remote_profiles()
         if synced or any(ROUTING_PROFILES_DIR.glob("*.json")):
             return
+        managed_names: set[str] = set()
         for profile in self.default_profiles():
             target = self._profile_path(profile.profile_id)
             if not target.exists():
                 target.write_text(json.dumps(profile.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
+            managed_names.add(target.name)
+        self._write_managed_remote_profile_names(managed_names)
 
     def list_profiles(self) -> list[RoutingProfile]:
         profiles: list[RoutingProfile] = []
@@ -77,6 +82,7 @@ class RoutingProfileManager:
         if not isinstance(entries, list):
             return False
 
+        remote_names: set[str] = set()
         synced_any = False
         for entry in entries:
             if not isinstance(entry, dict):
@@ -86,6 +92,7 @@ class RoutingProfileManager:
             name = str(entry.get("name", ""))
             if not name.endswith(".json"):
                 continue
+            remote_names.add(name)
             download_url = str(entry.get("download_url") or f"{ROUTING_PROFILES_RAW_BASE}/{name}")
             try:
                 profile = self._download_remote_profile(download_url)
@@ -96,7 +103,11 @@ class RoutingProfileManager:
                 encoding="utf-8",
             )
             synced_any = True
-        return synced_any
+        if remote_names and not synced_any:
+            return False
+        self._remove_missing_managed_profiles(remote_names)
+        self._write_managed_remote_profile_names(remote_names)
+        return True
 
     def _download_remote_profile(self, url: str) -> RoutingProfile:
         response = self.session.get(url, timeout=20)
@@ -109,6 +120,28 @@ class RoutingProfileManager:
     @staticmethod
     def _profile_path(profile_id: str) -> Path:
         return ROUTING_PROFILES_DIR / f"{profile_id}.json"
+
+    @staticmethod
+    def _read_managed_remote_profile_names() -> set[str]:
+        try:
+            payload = json.loads(MANAGED_REMOTE_PROFILES_INDEX.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return set()
+        if not isinstance(payload, list):
+            return set()
+        return {str(item) for item in payload if str(item).endswith(".json")}
+
+    @staticmethod
+    def _write_managed_remote_profile_names(profile_names: set[str]) -> None:
+        MANAGED_REMOTE_PROFILES_INDEX.write_text(
+            json.dumps(sorted(profile_names), indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    def _remove_missing_managed_profiles(self, remote_names: set[str]) -> None:
+        stale_names = self._read_managed_remote_profile_names() - remote_names
+        for name in stale_names:
+            ROUTING_PROFILES_DIR.joinpath(name).unlink(missing_ok=True)
 
     @staticmethod
     def default_profiles() -> list[RoutingProfile]:

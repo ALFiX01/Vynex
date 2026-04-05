@@ -29,12 +29,12 @@ vynex_vpn_client/
 ## Возможности
 
 - Автоматическая загрузка последнего `Xray-core` для Windows 64-bit через GitHub API.
-- Автоматическая загрузка `geoip.dat` и `geosite.dat` из репозитория Vynex VPN.
+- Автоматическая загрузка `geoip.dat`, `geosite.dat` и профилей маршрутизации из каталога `.database` репозитория Vynex VPN.
 - Импорт одиночных ссылок `vless://`, `vmess://`, `ss://`.
 - Импорт и обновление Base64-подписок.
 - Генерация `config.json` для `Proxy` режима с локальными `SOCKS5` и `HTTP` inbounds.
 - На старте недостающие `xray.exe`, `geoip.dat`, `geosite.dat` подтягиваются автоматически, а уже скачанные файлы повторно не скачиваются.
-- Отдельный пункт `Компоненты` для ручного обновления `xray.exe`, `geoip.dat`, `geosite.dat` или всех компонентов сразу.
+- Отдельный пункт `Компоненты` для ручного обновления `xray.exe`, `geoip.dat`, `geosite.dat`, профилей маршрутизации или всех компонентов сразу.
 - Отдельный пункт `Настройки` для выбора локальных `SOCKS5`/`HTTP` портов, режима системного proxy и активного набора маршрутизации.
 - Быстрый ручной сброс системного proxy Windows из `Настройки`.
 - Фоновый запуск `xray.exe` без черного окна через `subprocess.CREATE_NO_WINDOW`.
@@ -85,7 +85,7 @@ powershell -ExecutionPolicy Bypass -File .\build.ps1 -ForceIsolated
 1. Запустите приложение.
 2. При первом старте клиент сам скачает `xray.exe`, если бинарник отсутствует.
 3. Добавьте сервер через ссылку или импортируйте подписку.
-4. При необходимости откройте `Компоненты` и вручную обновите `xray.exe`, `geoip.dat`, `geosite.dat`.
+4. При необходимости откройте `Компоненты` и вручную обновите `xray.exe`, `geoip.dat`, `geosite.dat` и профили маршрутизации.
 5. При необходимости откройте `Настройки` и задайте локальные proxy-порты, системный proxy и активный набор маршрутизации.
 6. Выберите `Подключиться`, затем сервер.
 
@@ -95,7 +95,9 @@ powershell -ExecutionPolicy Bypass -File .\build.ps1 -ForceIsolated
 - Конфиги и состояние лежат в `%LOCALAPPDATA%\VynexVPNClient\data\`.
 - Файлы Xray runtime (`xray.exe`, `geoip.dat`, `geosite.dat`) лежат в `%LOCALAPPDATA%\VynexVPNClient\xray\`.
 - Профили маршрутизации лежат по одному JSON-файлу в `%LOCALAPPDATA%\VynexVPNClient\data\routing_profiles\`.
-- `geoip.dat` и `geosite.dat` скачиваются с:
-  - `https://github.com/ALFiX01/Vynex-VPN/raw/refs/heads/main/geoip.dat`
-  - `https://github.com/ALFiX01/Vynex-VPN/raw/refs/heads/main/geosite.dat`
+- `geoip.dat` и `geosite.dat` скачиваются из каталога `.database`:
+  - `https://raw.githubusercontent.com/ALFiX01/Vynex-VPN/main/.database/geoip.dat`
+  - `https://raw.githubusercontent.com/ALFiX01/Vynex-VPN/main/.database/geosite.dat`
+- Профили маршрутизации подтягиваются из:
+  - `https://api.github.com/repos/ALFiX01/Vynex-VPN/contents/.database/routing_profiles`
 - Если geo-файлы не удалось скачать, клиент покажет предупреждение при старте.

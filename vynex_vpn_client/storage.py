@@ -79,6 +79,42 @@ class JsonStorage:
     def get_server(self, server_id: str) -> ServerEntry | None:
         return next((item for item in self.load_servers() if item.id == server_id), None)
 
+    def delete_server(self, server_id: str) -> ServerEntry | None:
+        servers = self.load_servers()
+        target = next((server for server in servers if server.id == server_id), None)
+        if target is None:
+            return None
+        kept_servers = [server for server in servers if server.id != server_id]
+        self.save_servers(kept_servers)
+
+        subscriptions = self.load_subscriptions()
+        changed = False
+        for subscription in subscriptions:
+            if server_id in subscription.server_ids:
+                subscription.server_ids = [item_id for item_id in subscription.server_ids if item_id != server_id]
+                changed = True
+        if changed:
+            self.save_subscriptions(subscriptions)
+        return target
+
+    def remove_servers_by_ids(self, server_ids: set[str], *, subscription_id: str | None = None) -> int:
+        if not server_ids:
+            return 0
+        servers = self.load_servers()
+        kept_servers: list[ServerEntry] = []
+        removed_count = 0
+        for server in servers:
+            should_remove = server.id in server_ids
+            if should_remove and subscription_id is not None:
+                should_remove = server.source == "subscription" and server.subscription_id == subscription_id
+            if should_remove:
+                removed_count += 1
+                continue
+            kept_servers.append(server)
+        if removed_count:
+            self.save_servers(kept_servers)
+        return removed_count
+
     def load_subscriptions(self) -> list[SubscriptionEntry]:
         raw_items = self._read_json(SUBSCRIPTIONS_FILE, [])
         return [SubscriptionEntry.from_dict(item) for item in raw_items]
