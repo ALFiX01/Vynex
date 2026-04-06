@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 APP_NAME = "Vynex VPN Client"
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.2.0"
 APP_DIR = Path(__file__).resolve().parent.parent
 LOGO_FILE = APP_DIR / "logo.txt"
 LEGACY_DATA_DIR = APP_DIR / "data"

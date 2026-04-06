@@ -66,6 +66,17 @@ class JsonStorage:
     def upsert_server(self, server: ServerEntry) -> ServerEntry:
         servers = self.load_servers()
         for index, existing in enumerate(servers):
+            if existing.id == server.id:
+                if any(
+                    other.id != server.id and other.raw_link == server.raw_link
+                    for other in servers
+                ):
+                    raise ValueError("Сервер с такой ссылкой уже существует.")
+                server.created_at = existing.created_at
+                servers[index] = server
+                self.save_servers(servers)
+                return server
+        for index, existing in enumerate(servers):
             if existing.raw_link == server.raw_link:
                 server.id = existing.id
                 server.created_at = existing.created_at
@@ -97,6 +108,37 @@ class JsonStorage:
             self.save_subscriptions(subscriptions)
         return target
 
+    def detach_server_from_subscription(
+        self,
+        server_id: str,
+    ) -> tuple[ServerEntry | None, SubscriptionEntry | None]:
+        servers = self.load_servers()
+        target = next((server for server in servers if server.id == server_id), None)
+        if target is None:
+            return None, None
+
+        previous_subscription_id = target.subscription_id
+        target.source = "manual"
+        target.subscription_id = None
+        self.save_servers(servers)
+
+        if previous_subscription_id is None:
+            return target, None
+
+        subscriptions = self.load_subscriptions()
+        parent_subscription = next(
+            (subscription for subscription in subscriptions if subscription.id == previous_subscription_id),
+            None,
+        )
+        if parent_subscription is None:
+            return target, None
+        if server_id in parent_subscription.server_ids:
+            parent_subscription.server_ids = [
+                item_id for item_id in parent_subscription.server_ids if item_id != server_id
+            ]
+            self.save_subscriptions(subscriptions)
+        return target, parent_subscription
+
     def remove_servers_by_ids(self, server_ids: set[str], *, subscription_id: str | None = None) -> int:
         if not server_ids:
             return 0
@@ -122,11 +164,20 @@ class JsonStorage:
     def get_subscription_by_url(self, url: str) -> SubscriptionEntry | None:
         return next((item for item in self.load_subscriptions() if item.url == url), None)
 
+    def get_subscription(self, subscription_id: str) -> SubscriptionEntry | None:
+        return next((item for item in self.load_subscriptions() if item.id == subscription_id), None)
+
     def save_subscriptions(self, subscriptions: list[SubscriptionEntry]) -> None:
         self._write_json(SUBSCRIPTIONS_FILE, [item.to_dict() for item in subscriptions])
 
     def upsert_subscription(self, subscription: SubscriptionEntry) -> SubscriptionEntry:
         subscriptions = self.load_subscriptions()
+        for index, existing in enumerate(subscriptions):
+            if existing.id == subscription.id:
+                subscription.created_at = existing.created_at
+                subscriptions[index] = subscription
+                self.save_subscriptions(subscriptions)
+                return subscription
         for index, existing in enumerate(subscriptions):
             if existing.url == subscription.url:
                 subscription.id = existing.id
@@ -137,6 +188,41 @@ class JsonStorage:
         subscriptions.append(subscription)
         self.save_subscriptions(subscriptions)
         return subscription
+
+    def delete_subscription(
+        self,
+        subscription_id: str,
+        *,
+        remove_servers: bool = True,
+    ) -> tuple[SubscriptionEntry | None, int]:
+        subscriptions = self.load_subscriptions()
+        target = next((item for item in subscriptions if item.id == subscription_id), None)
+        if target is None:
+            return None, 0
+
+        kept_subscriptions = [item for item in subscriptions if item.id != subscription_id]
+        self.save_subscriptions(kept_subscriptions)
+
+        servers = self.load_servers()
+        kept_servers: list[ServerEntry] = []
+        affected_servers = 0
+        changed = False
+        for server in servers:
+            is_owned_by_subscription = server.source == "subscription" and server.subscription_id == subscription_id
+            if not is_owned_by_subscription:
+                kept_servers.append(server)
+                continue
+            affected_servers += 1
+            changed = True
+            if remove_servers:
+                continue
+            server.source = "manual"
+            server.subscription_id = None
+            kept_servers.append(server)
+
+        if changed:
+            self.save_servers(kept_servers)
+        return target, affected_servers
 
     def load_runtime_state(self) -> RuntimeState:
         raw = self._read_json(RUNTIME_STATE_FILE, RuntimeState().to_dict())

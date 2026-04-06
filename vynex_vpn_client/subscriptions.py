@@ -39,7 +39,12 @@ class SubscriptionManager:
             self.storage.remove_servers_by_ids(stale_server_ids, subscription_id=subscription.id)
         return imported
 
-    def refresh_all(self) -> tuple[list[tuple[SubscriptionEntry, int]], list[tuple[SubscriptionEntry, str]]]:
+    def refresh_all(
+        self,
+    ) -> tuple[
+        list[tuple[SubscriptionEntry, int]],
+        list[tuple[SubscriptionEntry, str]],
+    ]:
         success: list[tuple[SubscriptionEntry, int]] = []
         failed: list[tuple[SubscriptionEntry, str]] = []
         subscriptions = self.storage.load_subscriptions()
@@ -47,9 +52,14 @@ class SubscriptionManager:
             try:
                 imported = self.import_subscription(subscription)
                 subscription.updated_at = utc_now_iso()
+                subscription.last_error = None
+                subscription.last_error_at = None
                 self.storage.upsert_subscription(subscription)
                 success.append((subscription, len(imported)))
             except Exception as exc:  # noqa: BLE001
+                subscription.last_error = str(exc)
+                subscription.last_error_at = utc_now_iso()
+                self.storage.upsert_subscription(subscription)
                 failed.append((subscription, str(exc)))
         return success, failed
 

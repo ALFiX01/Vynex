@@ -29,7 +29,7 @@ from .constants import (
 )
 from .healthcheck import HealthcheckResult, XrayHealthChecker
 from .core import XrayInstaller
-from .models import AppSettings, RuntimeState, SubscriptionEntry, utc_now_iso
+from .models import AppSettings, RuntimeState, ServerEntry, SubscriptionEntry, utc_now_iso
 from .parsers import parse_share_link
 from .process_manager import XrayProcessManager
 from .routing_profiles import RoutingProfileManager
@@ -136,84 +136,97 @@ class VynexVpnApp:
             selected_action = self._select(
                 "Управление серверами и подписками",
                 choices=[
-                    f"Серверы: {len(servers)}",
-                    f"Подписки: {len(subscriptions)}",
-                    "Добавить сервер (Ссылка)",
-                    "Удалить сервер",
-                    "Добавить подписку (URL)",
-                    "Обновить подписки",
+                    f"Менеджер серверов: {len(servers)}",
+                    f"Менеджер подписок: {len(subscriptions)}",
                     "Назад",
                 ],
                 use_shortcuts=True,
             ).ask()
             if selected_action in (None, "Назад"):
                 return
-            if selected_action.startswith("Серверы:"):
+            if selected_action.startswith("Менеджер серверов:"):
                 self._show_servers_overview()
-            elif selected_action.startswith("Подписки:"):
+            elif selected_action.startswith("Менеджер подписок:"):
                 self._show_subscriptions_overview()
-            elif selected_action == "Добавить сервер (Ссылка)":
-                self.add_server_flow()
-            elif selected_action == "Удалить сервер":
-                self.delete_server_flow()
-            elif selected_action == "Добавить подписку (URL)":
-                self.add_subscription_flow()
-            elif selected_action == "Обновить подписки":
-                self.update_subscriptions_flow()
 
     def _show_servers_overview(self) -> None:
-        servers = self.storage.load_servers()
-        self._render_screen()
-        if not servers:
-            self.console.print(
-                Panel.fit(
-                    "Список серверов пуст. Добавьте сервер вручную или через подписку.",
-                    title="Серверы",
-                    border_style="yellow",
+        while True:
+            servers = self._sorted_servers(self.storage.load_servers())
+            state = self._current_state()
+            active_server_id = state.server_id if state.is_running else None
+            self._render_screen()
+            if servers:
+                self.console.print(self._servers_table(servers, active_server_id=active_server_id))
+            else:
+                self.console.print(
+                    Panel.fit(
+                        "Список серверов пуст. Добавьте сервер вручную или через подписку.",
+                        title="Менеджер серверов",
+                        border_style="yellow",
+                    )
                 )
-            )
-            self._pause()
-            return
-        table = Table(title="Серверы")
-        table.add_column("Имя", overflow="fold", max_width=max(24, self.console.width - 62))
-        table.add_column("Протокол", no_wrap=True)
-        table.add_column("Адрес", no_wrap=True)
-        table.add_column("Источник", no_wrap=True)
-        for server in servers:
-            table.add_row(
-                self._ui_server_name(server.name),
-                server.protocol.upper(),
-                f"{server.host}:{server.port}",
-                server.source,
-            )
-        self.console.print(table)
-        self._pause()
+            choices: list[Choice] = []
+            for server in servers:
+                choices.append(
+                    Choice(
+                        title=self._server_manager_choice_title(server, active_server_id=active_server_id),
+                        value=server.id,
+                    )
+                )
+            choices.append(Choice(title="Добавить сервер (Ссылка)", value="__add__"))
+            choices.append(Choice(title="Назад", value="__back__"))
+            selected_action = self._select(
+                "Менеджер серверов",
+                choices=choices,
+                use_shortcuts=True,
+            ).ask()
+            if selected_action in (None, "__back__"):
+                return
+            if selected_action == "__add__":
+                self.add_server_flow()
+                continue
+            self._server_details_flow(selected_action)
 
     def _show_subscriptions_overview(self) -> None:
-        subscriptions = self.storage.load_subscriptions()
-        self._render_screen()
-        if not subscriptions:
-            self.console.print(
-                Panel.fit(
-                    "Список подписок пуст. Добавьте первую подписку по URL.",
-                    title="Подписки",
-                    border_style="yellow",
+        while True:
+            subscriptions = self.storage.load_subscriptions()
+            self._render_screen()
+            if subscriptions:
+                self.console.print(self._subscriptions_table(subscriptions))
+            else:
+                self.console.print(
+                    Panel.fit(
+                        "Список подписок пуст. Добавьте первую подписку по URL.",
+                        title="Менеджер подписок",
+                        border_style="yellow",
+                    )
                 )
-            )
-            self._pause()
-            return
-        table = Table(title="Подписки")
-        table.add_column("Название", overflow="fold", max_width=max(22, self.console.width - 56))
-        table.add_column("Серверов", no_wrap=True)
-        table.add_column("Обновлено", no_wrap=True)
-        for subscription in subscriptions:
-            table.add_row(
-                subscription.title,
-                str(len(subscription.server_ids)),
-                self._shorten_text(subscription.updated_at, 19),
-            )
-        self.console.print(table)
-        self._pause()
+            choices: list[Choice] = []
+            for subscription in subscriptions:
+                choices.append(
+                    Choice(
+                        title=self._subscription_choice_title(subscription),
+                        value=subscription.id,
+                    )
+                )
+            choices.append(Choice(title="Добавить подписку (URL)", value="__add__"))
+            if subscriptions:
+                choices.append(Choice(title="Обновить все подписки", value="__refresh_all__"))
+            choices.append(Choice(title="Назад", value="__back__"))
+            selected_action = self._select(
+                "Менеджер подписок",
+                choices=choices,
+                use_shortcuts=True,
+            ).ask()
+            if selected_action in (None, "__back__"):
+                return
+            if selected_action == "__add__":
+                self.add_subscription_flow()
+                continue
+            if selected_action == "__refresh_all__":
+                self.update_subscriptions_flow()
+                continue
+            self._subscription_details_flow(selected_action)
 
     def connect_flow(self) -> None:
         servers = self.storage.load_servers()
@@ -377,21 +390,66 @@ class VynexVpnApp:
             return
         try:
             server = self.storage.upsert_server(parse_share_link(link))
-            table = Table(show_header=False, box=None)
-            table.add_row("Имя", self._ui_server_name(server.name))
-            table.add_row("Протокол", server.protocol.upper())
-            table.add_row("Адрес", f"{server.host}:{server.port}")
-            table.add_row("Источник", server.source)
-            self._render_screen()
-            self.console.print(Panel.fit(table, title="Сервер сохранен", border_style="green"))
-            self._pause()
+            self._show_server_saved("Сервер сохранен", server)
         except Exception as exc:  # noqa: BLE001
             self._render_screen()
             self._show_error("Ошибка парсинга", exc)
             self._pause()
 
+    def _server_details_flow(self, server_id: str) -> None:
+        while True:
+            server = self.storage.get_server(server_id)
+            if server is None:
+                return
+            parent_subscription = (
+                self.storage.get_subscription(server.subscription_id)
+                if server.subscription_id
+                else None
+            )
+            self._render_screen()
+            self.console.print(self._server_details_panel(server, parent_subscription=parent_subscription))
+            choices = ["Удалить сервер"]
+            if server.source == "manual":
+                choices = [
+                    "Переименовать",
+                    "Изменить ссылку",
+                    "Удалить сервер",
+                ]
+            elif server.source == "subscription":
+                choices = ["Отвязать от подписки", "Удалить сервер"]
+                if parent_subscription is not None:
+                    choices.insert(0, "Открыть подписку")
+            choices.append("Назад")
+            selected_action = self._select(
+                "Действия с сервером",
+                choices=choices,
+                use_shortcuts=True,
+            ).ask()
+            if selected_action in (None, "Назад"):
+                return
+            try:
+                if selected_action == "Переименовать":
+                    self._rename_server_flow(server)
+                elif selected_action == "Изменить ссылку":
+                    self._edit_server_link_flow(server)
+                elif selected_action == "Открыть подписку":
+                    if parent_subscription is None:
+                        raise ValueError("У сервера больше нет привязанной подписки.")
+                    self._subscription_details_flow(parent_subscription.id)
+                elif selected_action == "Отвязать от подписки":
+                    self._detach_server_from_subscription_flow(server)
+                elif selected_action == "Удалить сервер":
+                    if self._delete_server_with_prompt(server):
+                        return
+            except Exception as exc:  # noqa: BLE001
+                if self._is_user_cancelled(exc):
+                    continue
+                self._render_screen()
+                self._show_error("Ошибка сервера", exc)
+                self._pause()
+
     def delete_server_flow(self) -> None:
-        servers = self.storage.load_servers()
+        servers = self._sorted_servers(self.storage.load_servers())
         if not servers:
             self._render_screen()
             self.console.print(Panel.fit("Список серверов пуст.", border_style="yellow"))
@@ -424,6 +482,96 @@ class VynexVpnApp:
         server = next((item for item in servers if item.id == selected_server_id), None)
         if server is None:
             return
+        self._delete_server_with_prompt(server)
+
+    def _rename_server_flow(self, server: ServerEntry) -> None:
+        raw_name = questionary.text("Новое имя сервера", default=server.name).ask()
+        if raw_name is None:
+            raise ValueError("Переименование отменено.")
+        new_name = raw_name.strip() or server.name
+        if new_name == server.name:
+            return
+        server.name = new_name
+        self.storage.upsert_server(server)
+        self._show_server_saved("Сервер обновлен", server)
+
+    def _edit_server_link_flow(self, server: ServerEntry) -> None:
+        if server.source != "manual":
+            raise ValueError("Ссылку можно менять только у ручных серверов.")
+        raw_link = questionary.text("Новая ссылка сервера", default=server.raw_link).ask()
+        if raw_link is None:
+            raise ValueError("Изменение ссылки отменено.")
+        new_link = raw_link.strip()
+        if not new_link or new_link == server.raw_link:
+            return
+
+        state = self._current_state()
+        if state.is_running and state.server_id == server.id:
+            self._render_screen()
+            should_disconnect = questionary.confirm(
+                "Этот сервер сейчас активен. Отключить текущее подключение и сохранить новую ссылку?",
+                default=True,
+            ).ask()
+            if not should_disconnect:
+                raise ValueError("Изменение ссылки отменено.")
+            self._disconnect_runtime(silent=True)
+
+        updated_server = parse_share_link(new_link)
+        updated_server.id = server.id
+        updated_server.created_at = server.created_at
+        updated_server.name = server.name
+        self.storage.upsert_server(updated_server)
+        self._show_server_saved("Ссылка сервера обновлена", updated_server)
+
+    def _detach_server_from_subscription_flow(self, server: ServerEntry) -> None:
+        if server.source != "subscription":
+            return
+        subscription = self.storage.get_subscription(server.subscription_id) if server.subscription_id else None
+        subscription_name = subscription.title if subscription else "неизвестной подписки"
+        self._render_screen()
+        should_detach = questionary.confirm(
+            f"Отвязать сервер '{self._ui_server_name(server.name)}' от {subscription_name} и оставить как ручной?",
+            default=True,
+        ).ask()
+        if not should_detach:
+            return
+        detached_server, parent_subscription = self.storage.detach_server_from_subscription(server.id)
+        if detached_server is None:
+            self._render_screen()
+            self.console.print(Panel.fit("Сервер уже отсутствует в списке.", border_style="yellow"))
+            self._pause()
+            return
+        table = Table(show_header=False, box=None, pad_edge=False)
+        table.add_row("Сервер", self._ui_server_name(detached_server.name))
+        table.add_row("Источник", "ручной")
+        table.add_row("Подписка", parent_subscription.title if parent_subscription else subscription_name)
+        self._render_screen()
+        self.console.print(
+            Panel.fit(
+                table,
+                title="Сервер отвязан",
+                border_style="green",
+            )
+        )
+        self._pause()
+
+    def _delete_server_with_prompt(self, server: ServerEntry) -> bool:
+        if server.source == "subscription":
+            self._render_screen()
+            selected_action = self._select(
+                "Сервер импортирован из подписки",
+                choices=[
+                    "Удалить сервер из списка",
+                    "Отвязать от подписки и оставить как ручной",
+                    "Назад",
+                ],
+                use_shortcuts=True,
+            ).ask()
+            if selected_action in (None, "Назад"):
+                return False
+            if selected_action == "Отвязать от подписки и оставить как ручной":
+                self._detach_server_from_subscription_flow(server)
+                return False
 
         state = self._current_state()
         if state.is_running and state.server_id == server.id:
@@ -433,23 +581,29 @@ class VynexVpnApp:
                 default=True,
             ).ask()
             if not should_disconnect:
-                return
+                return False
             self._disconnect_runtime(silent=True)
 
         self._render_screen()
+        prompt = f"Удалить сервер '{self._ui_server_name(server.name)}'?"
+        if server.source == "subscription":
+            prompt = (
+                f"Удалить сервер '{self._ui_server_name(server.name)}' из списка?\n"
+                "После следующего обновления подписки он может появиться снова."
+            )
         should_delete = questionary.confirm(
-            f"Удалить сервер '{self._ui_server_name(server.name)}'?",
+            prompt,
             default=False,
         ).ask()
         if not should_delete:
-            return
+            return False
 
         deleted_server = self.storage.delete_server(server.id)
         if deleted_server is None:
             self._render_screen()
             self.console.print(Panel.fit("Сервер уже отсутствует в списке.", border_style="yellow"))
             self._pause()
-            return
+            return True
 
         self._render_screen()
         self.console.print(
@@ -460,39 +614,217 @@ class VynexVpnApp:
             )
         )
         self._pause()
+        return True
 
     def add_subscription_flow(self) -> None:
         url = questionary.text("Введите URL подписки").ask()
         if not url:
             return
-        default_title = self._subscription_default_title(url)
+        normalized_url = url.strip()
+        if not normalized_url:
+            return
+        existing = self.storage.get_subscription_by_url(normalized_url)
+        default_title = existing.title if existing else self._subscription_default_title(normalized_url)
         raw_title = questionary.text("Название подписки", default=default_title).ask()
         if raw_title is None:
             return
         title = raw_title or default_title
-        subscription = self.storage.get_subscription_by_url(url) or SubscriptionEntry.new(url=url, title=title)
+        subscription = existing or SubscriptionEntry.new(url=normalized_url, title=title)
+        subscription.url = normalized_url
         subscription.title = title
         try:
-            imported = self.subscription_manager.import_subscription(subscription)
-            subscription.updated_at = utc_now_iso()
-            self.storage.upsert_subscription(subscription)
-            protocols = self.subscription_manager.summarize_protocols(imported)
-            table = Table(show_header=True)
-            table.add_column("Параметр")
-            table.add_column("Значение", overflow="fold", max_width=max(30, self.console.width - 28))
-            table.add_row("Подписка", subscription.title)
-            table.add_row("Серверов", str(len(imported)))
-            table.add_row(
-                "Протоколы",
-                ", ".join(f"{name.upper()}: {count}" for name, count in protocols.items()) or "-",
-            )
-            self._render_screen()
-            self.console.print(Panel.fit(table, title="Подписка добавлена", border_style="green"))
-            self._pause()
+            imported = self._refresh_subscription(subscription)
+            self._show_subscription_refresh_success("Подписка сохранена", subscription, imported)
         except Exception as exc:  # noqa: BLE001
+            if existing is not None:
+                self._record_subscription_error(existing, exc)
             self._render_screen()
             self._show_error("Ошибка подписки", exc)
             self._pause()
+
+    def _subscription_details_flow(self, subscription_id: str) -> None:
+        while True:
+            subscription = self.storage.get_subscription(subscription_id)
+            if subscription is None:
+                return
+            self._render_screen()
+            self.console.print(self._subscription_details_panel(subscription))
+            selected_action = self._select(
+                "Действия с подпиской",
+                choices=[
+                    "Обновить",
+                    "Изменить название",
+                    "Изменить URL",
+                    "Показать серверы подписки",
+                    "Удалить подписку",
+                    "Назад",
+                ],
+                use_shortcuts=True,
+            ).ask()
+            if selected_action in (None, "Назад"):
+                return
+            try:
+                if selected_action == "Обновить":
+                    imported = self._refresh_subscription(subscription)
+                    self._show_subscription_refresh_success("Подписка обновлена", subscription, imported)
+                elif selected_action == "Изменить название":
+                    self._rename_subscription_flow(subscription)
+                elif selected_action == "Изменить URL":
+                    self._edit_subscription_url_flow(subscription)
+                elif selected_action == "Показать серверы подписки":
+                    self._show_subscription_servers(subscription)
+                elif selected_action == "Удалить подписку":
+                    if self._delete_subscription_flow(subscription):
+                        return
+            except Exception as exc:  # noqa: BLE001
+                if self._is_user_cancelled(exc):
+                    continue
+                self._render_screen()
+                self._show_error("Ошибка подписки", exc)
+                self._pause()
+
+    def _rename_subscription_flow(self, subscription: SubscriptionEntry) -> None:
+        raw_title = questionary.text("Новое название подписки", default=subscription.title).ask()
+        if raw_title is None:
+            raise ValueError("Переименование отменено.")
+        title = raw_title.strip() or subscription.title
+        if title == subscription.title:
+            return
+        subscription.title = title
+        self.storage.upsert_subscription(subscription)
+        self._render_screen()
+        self.console.print(
+            Panel.fit(
+                f"Новое название: {subscription.title}",
+                title="Подписка обновлена",
+                border_style="green",
+            )
+        )
+        self._pause()
+
+    def _edit_subscription_url_flow(self, subscription: SubscriptionEntry) -> None:
+        raw_url = questionary.text("Новый URL подписки", default=subscription.url).ask()
+        if raw_url is None:
+            raise ValueError("Изменение URL отменено.")
+        new_url = raw_url.strip()
+        if not new_url or new_url == subscription.url:
+            return
+        duplicate = next(
+            (
+                item
+                for item in self.storage.load_subscriptions()
+                if item.url == new_url and item.id != subscription.id
+            ),
+            None,
+        )
+        if duplicate is not None:
+            raise ValueError(f"Подписка с этим URL уже существует: {duplicate.title}.")
+        updated_subscription = SubscriptionEntry.from_dict(subscription.to_dict())
+        updated_subscription.url = new_url
+        try:
+            imported = self._refresh_subscription(updated_subscription)
+        except Exception as exc:  # noqa: BLE001
+            self._record_subscription_error(subscription, exc)
+            raise
+        subscription.url = updated_subscription.url
+        subscription.updated_at = updated_subscription.updated_at
+        subscription.server_ids = updated_subscription.server_ids
+        subscription.last_error = None
+        subscription.last_error_at = None
+        self._show_subscription_refresh_success("URL подписки обновлен", subscription, imported)
+
+    def _show_subscription_servers(self, subscription: SubscriptionEntry) -> None:
+        servers = self._subscription_servers(subscription.id)
+        self._render_screen()
+        if not servers:
+            self.console.print(
+                Panel.fit(
+                    "У этой подписки сейчас нет привязанных серверов.",
+                    title=subscription.title,
+                    border_style="yellow",
+                )
+            )
+            self._pause()
+            return
+        table = Table(title=f"Серверы подписки: {subscription.title}")
+        table.add_column("Имя", overflow="fold", max_width=max(20, self.console.width - 62))
+        table.add_column("Протокол", no_wrap=True)
+        table.add_column("Адрес", no_wrap=True)
+        for server in servers:
+            table.add_row(
+                self._ui_server_name(server.name),
+                server.protocol.upper(),
+                f"{server.host}:{server.port}",
+            )
+        self.console.print(table)
+        self._pause()
+
+    def _delete_subscription_flow(self, subscription: SubscriptionEntry) -> bool:
+        servers = self._subscription_servers(subscription.id)
+        remove_action = self._select(
+            "Как удалить подписку?",
+            choices=[
+                Choice(
+                    title=f"Удалить подписку и ее серверы ({len(servers)})",
+                    value="remove",
+                ),
+                Choice(
+                    title=f"Удалить подписку, серверы оставить как ручные ({len(servers)})",
+                    value="detach",
+                ),
+                Choice(title="Назад", value="back"),
+            ],
+            use_shortcuts=True,
+        ).ask()
+        if remove_action in (None, "back"):
+            return False
+
+        remove_servers = remove_action == "remove"
+        state = self._current_state()
+        subscription_server_ids = {server.id for server in servers}
+        if remove_servers and state.is_running and state.server_id in subscription_server_ids:
+            self._render_screen()
+            should_disconnect = questionary.confirm(
+                "Сервер этой подписки сейчас активен. Отключить текущее подключение и продолжить удаление?",
+                default=True,
+            ).ask()
+            if not should_disconnect:
+                return False
+            self._disconnect_runtime(silent=True)
+
+        action_text = "удалить подписку и ее серверы" if remove_servers else "удалить подписку и отвязать серверы"
+        self._render_screen()
+        should_delete = questionary.confirm(
+            f"Подтвердите: {action_text} '{subscription.title}'?",
+            default=False,
+        ).ask()
+        if not should_delete:
+            return False
+
+        deleted_subscription, affected_servers = self.storage.delete_subscription(
+            subscription.id,
+            remove_servers=remove_servers,
+        )
+        if deleted_subscription is None:
+            self._render_screen()
+            self.console.print(Panel.fit("Подписка уже отсутствует в списке.", border_style="yellow"))
+            self._pause()
+            return True
+
+        result_label = "Удалено серверов" if remove_servers else "Серверов отвязано"
+        table = Table(show_header=False, box=None)
+        table.add_row("Подписка", deleted_subscription.title)
+        table.add_row(result_label, str(affected_servers))
+        self._render_screen()
+        self.console.print(
+            Panel.fit(
+                table,
+                title="Подписка удалена",
+                border_style="green",
+            )
+        )
+        self._pause()
+        return True
 
     def settings_flow(self) -> None:
         while True:
@@ -983,6 +1315,53 @@ class VynexVpnApp:
                     details,
                 )
 
+        if title == "Ошибка сервера":
+            if "поддерживаются только ссылки" in normalized:
+                return (
+                    "Вставлена ссылка неподдерживаемого формата.",
+                    [
+                        "Используйте ссылку формата vless://, vmess:// или ss://.",
+                        "Для сервера из подписки сначала отвяжите его, а потом редактируйте как ручной.",
+                    ],
+                    details,
+                )
+            if "vmess" in normalized or "vless" in normalized or "shadowsocks" in normalized:
+                return (
+                    "Ссылка сервера повреждена или заполнена не полностью.",
+                    [
+                        "Проверьте, что ссылка скопирована целиком без лишних символов.",
+                        "Если это ручной сервер, попробуйте вставить исходную ссылку заново.",
+                    ],
+                    details,
+                )
+            if "такой ссылкой уже существует" in normalized:
+                return (
+                    "Сервер с такой ссылкой уже есть в списке.",
+                    [
+                        "Откройте существующую запись и используйте ее вместо создания дубля.",
+                        "Если нужно сохранить оба варианта, сначала отвяжите или удалите конфликтующую запись.",
+                    ],
+                    details,
+                )
+            if "только у ручных серверов" in normalized:
+                return (
+                    "Это действие доступно только для ручных серверов.",
+                    [
+                        "Для сервера из подписки сначала используйте действие 'Отвязать от подписки'.",
+                        "После этого сервер можно будет редактировать как обычный ручной.",
+                    ],
+                    details,
+                )
+            if "привязанной подписки" in normalized:
+                return (
+                    "У этого сервера уже нет доступной подписки-источника.",
+                    [
+                        "Откройте менеджер подписок и проверьте, существует ли исходная подписка.",
+                        "Если сервер нужен отдельно, отвяжите его от подписки и оставьте как ручной.",
+                    ],
+                    details,
+                )
+
         return (
             "Операция завершилась с ошибкой.",
             [
@@ -1026,6 +1405,182 @@ class VynexVpnApp:
         aligned_name = self._pad_display_width(self._truncate_display_width(server_name, name_width), name_width)
         aligned_protocol = self._pad_display_width(protocol, protocol_width)
         return f"{aligned_name} | {aligned_protocol} | {address}"
+
+    def _show_server_saved(self, title: str, server: ServerEntry) -> None:
+        table = Table(show_header=False, box=None, pad_edge=False)
+        table.add_column("Параметр", no_wrap=True, style="bold")
+        table.add_column("Значение", overflow="fold", max_width=max(30, self.console.width - 32))
+        table.add_row("Имя", self._ui_server_name(server.name))
+        table.add_row("Протокол", server.protocol.upper())
+        table.add_row("Адрес", f"{server.host}:{server.port}")
+        table.add_row("Источник", self._server_source_label(server))
+        self._render_screen()
+        self.console.print(Panel.fit(table, title=title, border_style="green"))
+        self._pause()
+
+    def _servers_table(self, servers: list[ServerEntry], *, active_server_id: str | None) -> Table:
+        table = Table(title="Серверы")
+        table.add_column("Имя", overflow="fold", max_width=max(20, self.console.width - 70))
+        table.add_column("Протокол", no_wrap=True)
+        table.add_column("Адрес", no_wrap=True)
+        table.add_column("Источник", no_wrap=True)
+        table.add_column("Статус", no_wrap=True)
+        for server in servers:
+            table.add_row(
+                self._ui_server_name(server.name),
+                server.protocol.upper(),
+                f"{server.host}:{server.port}",
+                self._server_source_label(server),
+                "Активен" if server.id == active_server_id else "Ожидание",
+            )
+        return table
+
+    def _server_manager_choice_title(self, server: ServerEntry, *, active_server_id: str | None) -> str:
+        return self._truncate_display_width(
+            self._ui_server_name(server.name),
+            max(18, self.console.width - 10),
+        )
+
+    def _server_details_panel(
+        self,
+        server: ServerEntry,
+        *,
+        parent_subscription: SubscriptionEntry | None = None,
+    ) -> Panel:
+        table = Table(show_header=False, box=None, pad_edge=False)
+        table.add_column("Параметр", no_wrap=True, style="bold")
+        table.add_column("Значение", overflow="fold", max_width=max(34, self.console.width - 34))
+        table.add_row("Имя", self._ui_server_name(server.name))
+        table.add_row("Протокол", server.protocol.upper())
+        table.add_row("Адрес", f"{server.host}:{server.port}")
+        table.add_row("Источник", self._server_source_label(server))
+        table.add_row("Создан", self._shorten_text(server.created_at, 19))
+        if parent_subscription is not None:
+            table.add_row("Подписка", parent_subscription.title)
+        if server.source == "subscription":
+            table.add_row("Примечание", "После обновления подписки параметры сервера могут измениться.")
+        return Panel.fit(
+            table,
+            title=f"Сервер: {self._ui_server_name(server.name)}",
+            border_style="cyan" if server.source == "manual" else "yellow",
+        )
+
+    def _server_source_label(self, server: ServerEntry) -> str:
+        if server.source == "manual":
+            return "ручной"
+        if server.source == "subscription":
+            subscription = self.storage.get_subscription(server.subscription_id) if server.subscription_id else None
+            if subscription is not None:
+                return f"подписка ({self._shorten_text(subscription.title, 18)})"
+            return "подписка"
+        return server.source
+
+    def _server_source_short_label(self, server: ServerEntry) -> str:
+        if server.source == "manual":
+            return "ручной"
+        if server.source == "subscription":
+            return "подписка"
+        return server.source
+
+    @staticmethod
+    def _sorted_servers(servers: list[ServerEntry]) -> list[ServerEntry]:
+        return sorted(
+            servers,
+            key=lambda item: (
+                item.source != "manual",
+                item.protocol.lower(),
+                item.name.lower(),
+                item.host.lower(),
+                item.port,
+            ),
+        )
+
+    def _refresh_subscription(self, subscription: SubscriptionEntry) -> list[ServerEntry]:
+        imported = self.subscription_manager.import_subscription(subscription)
+        subscription.updated_at = utc_now_iso()
+        subscription.last_error = None
+        subscription.last_error_at = None
+        self.storage.upsert_subscription(subscription)
+        return imported
+
+    def _record_subscription_error(self, subscription: SubscriptionEntry, error: Exception | str) -> None:
+        subscription.last_error = self._error_text(error)
+        subscription.last_error_at = utc_now_iso()
+        self.storage.upsert_subscription(subscription)
+
+    def _show_subscription_refresh_success(
+        self,
+        title: str,
+        subscription: SubscriptionEntry,
+        imported: list[ServerEntry],
+    ) -> None:
+        protocols = self.subscription_manager.summarize_protocols(imported)
+        table = Table(show_header=False, box=None, pad_edge=False)
+        table.add_column("Параметр", no_wrap=True, style="bold")
+        table.add_column("Значение", overflow="fold", max_width=max(30, self.console.width - 32))
+        table.add_row("Подписка", subscription.title)
+        table.add_row("Серверов", str(len(imported)))
+        table.add_row(
+            "Протоколы",
+            ", ".join(f"{name.upper()}: {count}" for name, count in protocols.items()) or "-",
+        )
+        self._render_screen()
+        self.console.print(Panel.fit(table, title=title, border_style="green"))
+        self._pause()
+
+    def _subscriptions_table(self, subscriptions: list[SubscriptionEntry]) -> Table:
+        table = Table(title="Подписки")
+        table.add_column("Название", overflow="fold", max_width=max(20, self.console.width - 72))
+        table.add_column("Серверов", no_wrap=True)
+        table.add_column("Обновлено", no_wrap=True)
+        table.add_column("Статус", no_wrap=True)
+        for subscription in subscriptions:
+            table.add_row(
+                self._layout_safe_text(subscription.title),
+                str(len(self._subscription_servers(subscription.id))),
+                self._shorten_text(subscription.updated_at, 19),
+                self._subscription_status_label(subscription),
+            )
+        return table
+
+    def _subscription_choice_title(self, subscription: SubscriptionEntry) -> str:
+        return self._truncate_display_width(
+            self._layout_safe_text(subscription.title),
+            max(18, self.console.width - 10),
+        )
+
+    def _subscription_status_label(self, subscription: SubscriptionEntry) -> str:
+        if subscription.last_error:
+            return "Ошибка"
+        if not self._subscription_servers(subscription.id):
+            return "Пусто"
+        return "OK"
+
+    def _subscription_details_panel(self, subscription: SubscriptionEntry) -> Panel:
+        table = Table(show_header=False, box=None, pad_edge=False)
+        table.add_column("Параметр", no_wrap=True, style="bold")
+        table.add_column("Значение", overflow="fold", max_width=max(34, self.console.width - 34))
+        table.add_row("Название", subscription.title)
+        table.add_row("URL", subscription.url)
+        table.add_row("Серверов", str(len(self._subscription_servers(subscription.id))))
+        table.add_row("Обновлено", self._shorten_text(subscription.updated_at, 19))
+        table.add_row("Статус", self._subscription_status_label(subscription))
+        if subscription.last_error:
+            table.add_row("Последняя ошибка", subscription.last_error)
+            table.add_row("Когда", self._shorten_text(subscription.last_error_at or "-", 19))
+        return Panel.fit(
+            table,
+            title=f"Подписка: {subscription.title}",
+            border_style="yellow" if subscription.last_error else "cyan",
+        )
+
+    def _subscription_servers(self, subscription_id: str) -> list[ServerEntry]:
+        servers = [
+            server
+            for server in self.storage.load_servers()
+            if server.source == "subscription" and server.subscription_id == subscription_id
+        ]
+        return sorted(servers, key=lambda item: item.name.lower())
 
     @staticmethod
     def _display_width(value: str) -> int:

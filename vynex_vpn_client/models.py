@@ -64,6 +64,9 @@ class SubscriptionEntry:
     created_at: str = field(default_factory=utc_now_iso)
     updated_at: str = field(default_factory=utc_now_iso)
     server_ids: list[str] = field(default_factory=list)
+    auto_update: bool = True
+    last_error: str | None = None
+    last_error_at: str | None = None
 
     @classmethod
     def new(cls, *, url: str, title: str) -> "SubscriptionEntry":
