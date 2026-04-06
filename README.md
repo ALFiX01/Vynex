@@ -7,7 +7,7 @@
     <a href="https://github.com/ALFiX01/Vynex/releases"><img src="https://img.shields.io/github/downloads/ALFiX01/Vynex/VynexVPNClient.exe?style=plastic" alt="GitHub EXE Downloads"></a>
   </p>
 
-Консольный CLI/TUI клиент для Windows 10/11, который управляет `xray.exe`, импортирует сервера и подписки, а также запускает Xray-core в режиме `Proxy`.
+Консольный клиент для Windows 10/11, который управляет `xray.exe`, импортирует сервера и подписки, а также запускает Xray-core в режиме `Proxy`.
 
 ## Возможности
 
