@@ -83,6 +83,7 @@ class SubscriptionEntry:
 @dataclass
 class RuntimeState:
     pid: int | None = None
+    helper_pid: int | None = None
     mode: str | None = None
     server_id: str | None = None
     started_at: str | None = None
@@ -98,6 +99,7 @@ class RuntimeState:
     def from_dict(cls, data: dict[str, Any]) -> "RuntimeState":
         return cls(
             pid=data.get("pid"),
+            helper_pid=data.get("helper_pid"),
             mode=data.get("mode"),
             server_id=data.get("server_id"),
             started_at=data.get("started_at"),
@@ -129,6 +131,7 @@ class ProxyRuntimeSession:
 class AppSettings:
     active_routing_profile_id: str = "default"
     set_system_proxy: bool = True
+    connection_mode: str = "PROXY"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -138,4 +141,5 @@ class AppSettings:
         return cls(
             active_routing_profile_id=data.get("active_routing_profile_id", "default"),
             set_system_proxy=bool(data.get("set_system_proxy", True)),
+            connection_mode=str(data.get("connection_mode", "PROXY") or "PROXY"),
         )

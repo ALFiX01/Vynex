@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .constants import LOCAL_PROXY_HOST
 from .models import LocalProxyCredentials, ServerEntry
 from .routing_profiles import RoutingProfile
 
@@ -58,7 +59,7 @@ class XrayConfigBuilder:
             inbounds.append(
                 {
                     "tag": "socks-in",
-                    "listen": "127.0.0.1",
+                    "listen": LOCAL_PROXY_HOST,
                     "port": socks_port,
                     "protocol": "socks",
                     "settings": {
@@ -80,7 +81,7 @@ class XrayConfigBuilder:
             inbounds.append(
                 {
                     "tag": "http-in",
-                    "listen": "127.0.0.1",
+                    "listen": LOCAL_PROXY_HOST,
                     "port": http_port,
                     "protocol": "http",
                     "settings": {},

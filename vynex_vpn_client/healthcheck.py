@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 import requests
 
-from .constants import HEALTHCHECK_ATTEMPTS, HEALTHCHECK_TIMEOUT, HEALTHCHECK_URLS
+from .constants import HEALTHCHECK_ATTEMPTS, HEALTHCHECK_TIMEOUT, HEALTHCHECK_URLS, LOCAL_PROXY_HOST
 
 
 @dataclass
@@ -29,13 +29,25 @@ class XrayHealthChecker:
         timeout: int = HEALTHCHECK_TIMEOUT,
     ) -> HealthcheckResult:
         proxies = {
-            "http": f"http://127.0.0.1:{http_port}",
-            "https": f"http://127.0.0.1:{http_port}",
+            "http": f"http://{LOCAL_PROXY_HOST}:{http_port}",
+            "https": f"http://{LOCAL_PROXY_HOST}:{http_port}",
         }
         return self._probe(
             attempts=attempts,
             timeout=timeout,
             request_kwargs={"proxies": proxies},
+        )
+
+    def verify_direct(
+        self,
+        *,
+        attempts: int = HEALTHCHECK_ATTEMPTS,
+        timeout: int = HEALTHCHECK_TIMEOUT,
+    ) -> HealthcheckResult:
+        return self._probe(
+            attempts=attempts,
+            timeout=timeout,
+            request_kwargs={},
         )
 
     def _probe(

@@ -5,8 +5,11 @@ import ctypes
 import secrets
 import socket
 import string
+import subprocess
 import time
 from urllib.parse import unquote
+
+from .constants import LOCAL_PROXY_HOST
 
 RUNTIME_PORT_MIN = 20000
 RUNTIME_PORT_MAX = 60000
@@ -40,7 +43,7 @@ def is_process_running(pid: int) -> bool:
         ctypes.windll.kernel32.CloseHandle(process_handle)
 
 
-def is_port_available(port: int, host: str = "127.0.0.1") -> bool:
+def is_port_available(port: int, host: str = LOCAL_PROXY_HOST) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.settimeout(0.5)
         return sock.connect_ex((host, port)) != 0
@@ -55,7 +58,7 @@ def clamp_port(port: int) -> int:
 def pick_random_port(
     *,
     used_ports: set[int] | None = None,
-    host: str = "127.0.0.1",
+    host: str = LOCAL_PROXY_HOST,
     min_port: int = RUNTIME_PORT_MIN,
     max_port: int = RUNTIME_PORT_MAX,
     attempts: int = 128,
@@ -91,7 +94,7 @@ def generate_random_password(length: int = 32) -> str:
 def wait_for_port_listener(
     port: int,
     *,
-    host: str = "127.0.0.1",
+    host: str = LOCAL_PROXY_HOST,
     timeout: float = 10.0,
     interval: float = 0.2,
 ) -> bool:
@@ -101,3 +104,39 @@ def wait_for_port_listener(
             return True
         time.sleep(interval)
     return not is_port_available(port, host=host)
+
+
+def is_tun_interface_ready(interface_name: str) -> bool:
+    escaped_name = interface_name.replace("'", "''")
+    command = (
+        f"$adapter = Get-NetAdapter -Name '{escaped_name}' -ErrorAction SilentlyContinue; "
+        f"$route = Get-NetRoute -InterfaceAlias '{escaped_name}' -AddressFamily IPv4 "
+        "-ErrorAction SilentlyContinue | Select-Object -First 1; "
+        "if ($null -eq $adapter -or $null -eq $route) { exit 1 }; "
+        "if ($adapter.Status -eq 'Up') { exit 0 } else { exit 2 }"
+    )
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-Command", command],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="ignore",
+        creationflags=creationflags,
+    )
+    return result.returncode == 0
+
+
+def wait_for_tun_interface(
+    interface_name: str,
+    *,
+    timeout: float = 12.0,
+    interval: float = 0.2,
+) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if is_tun_interface_ready(interface_name):
+            return True
+        time.sleep(interval)
+    return is_tun_interface_ready(interface_name)

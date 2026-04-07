@@ -5,6 +5,8 @@ import winreg
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from .constants import LOCAL_PROXY_HOST
+
 
 INTERNET_OPTION_REFRESH = 37
 INTERNET_OPTION_SETTINGS_CHANGED = 39
@@ -42,11 +44,11 @@ class WindowsSystemProxyManager:
 
     def enable_proxy(self, *, http_port: int, socks_port: int | None = None) -> None:
         proxy_entries = [
-            f"http=127.0.0.1:{http_port}",
-            f"https=127.0.0.1:{http_port}",
+            f"http={LOCAL_PROXY_HOST}:{http_port}",
+            f"https={LOCAL_PROXY_HOST}:{http_port}",
         ]
         if socks_port is not None:
-            proxy_entries.append(f"socks=127.0.0.1:{socks_port}")
+            proxy_entries.append(f"socks={LOCAL_PROXY_HOST}:{socks_port}")
         proxy_server = ";".join(proxy_entries)
         with winreg.OpenKey(
             winreg.HKEY_CURRENT_USER,
