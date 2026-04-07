@@ -31,12 +31,13 @@ class RoutingProfileManager:
     def __init__(self) -> None:
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": "Vynex-Client/1.0"})
-        self._ensure_defaults()
+        self._profiles_cache: list[RoutingProfile] | None = None
+        self._profiles_signature: tuple[tuple[str, int, int], ...] | None = None
+        self._ensure_local_defaults()
 
-    def _ensure_defaults(self) -> None:
+    def _ensure_local_defaults(self) -> None:
         ROUTING_PROFILES_DIR.mkdir(parents=True, exist_ok=True)
-        synced = self._sync_remote_profiles()
-        if synced or any(ROUTING_PROFILES_DIR.glob("*.json")):
+        if any(ROUTING_PROFILES_DIR.glob("*.json")):
             return
         managed_names: set[str] = set()
         for profile in self.default_profiles():
@@ -47,6 +48,9 @@ class RoutingProfileManager:
         self._write_managed_remote_profile_names(managed_names)
 
     def list_profiles(self) -> list[RoutingProfile]:
+        signature = self._profile_signature()
+        if self._profiles_cache is not None and self._profiles_signature == signature:
+            return list(self._profiles_cache)
         profiles: list[RoutingProfile] = []
         for path in sorted(ROUTING_PROFILES_DIR.glob("*.json")):
             try:
@@ -61,7 +65,9 @@ class RoutingProfileManager:
                     )
             except (OSError, json.JSONDecodeError, TypeError):
                 continue
-        return profiles
+        self._profiles_cache = profiles
+        self._profiles_signature = self._profile_signature()
+        return list(profiles)
 
     def get_profile(self, profile_id: str) -> RoutingProfile | None:
         return next((profile for profile in self.list_profiles() if profile.profile_id == profile_id), None)
@@ -69,6 +75,7 @@ class RoutingProfileManager:
     def update_profiles(self) -> list[RoutingProfile]:
         if not self._sync_remote_profiles():
             raise RuntimeError("Не удалось обновить профили маршрутизации из GitHub.")
+        self._invalidate_cache()
         return self.list_profiles()
 
     def _sync_remote_profiles(self) -> bool:
@@ -142,6 +149,21 @@ class RoutingProfileManager:
         stale_names = self._read_managed_remote_profile_names() - remote_names
         for name in stale_names:
             ROUTING_PROFILES_DIR.joinpath(name).unlink(missing_ok=True)
+
+    def _invalidate_cache(self) -> None:
+        self._profiles_cache = None
+        self._profiles_signature = None
+
+    @staticmethod
+    def _profile_signature() -> tuple[tuple[str, int, int], ...]:
+        signature: list[tuple[str, int, int]] = []
+        for path in sorted(ROUTING_PROFILES_DIR.glob("*.json")):
+            try:
+                stat = path.stat()
+                signature.append((path.name, stat.st_mtime_ns, stat.st_size))
+            except OSError:
+                signature.append((path.name, 0, 0))
+        return tuple(signature)
 
     @staticmethod
     def default_profiles() -> list[RoutingProfile]:

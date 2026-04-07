@@ -34,11 +34,14 @@ class JsonStorage:
         if not LEGACY_DATA_DIR.exists():
             return
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        for filename in ("servers.json", "subscriptions.json", "runtime_state.json", "xray.log", "config.json"):
+        for filename in ("servers.json", "subscriptions.json", "runtime_state.json", "settings.json"):
             source = LEGACY_DATA_DIR / filename
             destination = DATA_DIR / filename
             if source.exists() and not destination.exists():
-                shutil.copy2(source, destination)
+                try:
+                    shutil.copy2(source, destination)
+                except OSError:
+                    continue
 
     @staticmethod
     def _ensure_file(path: Path, default: list[Any] | dict[str, Any]) -> None:

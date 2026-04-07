@@ -4,8 +4,11 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 import re
+import sys
+import threading
 from typing import Callable
 from urllib.parse import urlparse
+import webbrowser
 
 import questionary
 from questionary import Choice, Style
@@ -16,27 +19,82 @@ from rich.table import Table
 from rich.text import Text
 from wcwidth import wcswidth
 
-from .config_builder import XrayConfigBuilder
-from .constants import (
-    APP_NAME,
-    APP_VERSION,
-    GEOIP_PATH,
-    GEOSITE_PATH,
-    LOGO_FILE,
-    SUBSCRIPTION_TITLE_BY_HOST,
-    XRAY_EXECUTABLE,
-    XRAY_CONFIG,
-)
-from .healthcheck import HealthcheckResult, XrayHealthChecker
-from .core import XrayInstaller
-from .models import AppSettings, RuntimeState, ServerEntry, SubscriptionEntry, utc_now_iso
-from .parsers import parse_share_link
-from .process_manager import XrayProcessManager
-from .routing_profiles import RoutingProfileManager
-from .storage import JsonStorage
-from .subscriptions import SubscriptionManager
-from .system_proxy import SystemProxyState, WindowsSystemProxyManager
-from .utils import clamp_port, is_port_available
+if __package__ in {None, ""}:
+    package_root = Path(__file__).resolve().parent.parent
+    if str(package_root) not in sys.path:
+        sys.path.insert(0, str(package_root))
+
+    from vynex_vpn_client.app_update import AppReleaseInfo, AppUpdateChecker
+    from vynex_vpn_client.config_builder import XrayConfigBuilder
+    from vynex_vpn_client.constants import (
+        APP_NAME,
+        APP_VERSION,
+        GEOIP_PATH,
+        GEOSITE_PATH,
+        LOGO_FILE,
+        SUBSCRIPTION_TITLE_BY_HOST,
+        XRAY_EXECUTABLE,
+    )
+    from vynex_vpn_client.healthcheck import HealthcheckResult, XrayHealthChecker
+    from vynex_vpn_client.core import XrayInstaller
+    from vynex_vpn_client.models import (
+        AppSettings,
+        LocalProxyCredentials,
+        ProxyRuntimeSession,
+        RuntimeState,
+        ServerEntry,
+        SubscriptionEntry,
+        utc_now_iso,
+    )
+    from vynex_vpn_client.parsers import extract_supported_share_links, is_supported_share_link, parse_share_link
+    from vynex_vpn_client.process_manager import XrayProcessManager
+    from vynex_vpn_client.routing_profiles import RoutingProfileManager
+    from vynex_vpn_client.storage import JsonStorage
+    from vynex_vpn_client.subscriptions import SubscriptionManager
+    from vynex_vpn_client.system_proxy import SystemProxyState, WindowsSystemProxyManager
+    from vynex_vpn_client.utils import (
+        clamp_port,
+        generate_random_password,
+        generate_random_username,
+        pick_random_port,
+        wait_for_port_listener,
+    )
+else:
+    from .app_update import AppReleaseInfo, AppUpdateChecker
+    from .config_builder import XrayConfigBuilder
+    from .constants import (
+        APP_NAME,
+        APP_VERSION,
+        GEOIP_PATH,
+        GEOSITE_PATH,
+        LOGO_FILE,
+        SUBSCRIPTION_TITLE_BY_HOST,
+        XRAY_EXECUTABLE,
+    )
+    from .healthcheck import HealthcheckResult, XrayHealthChecker
+    from .core import XrayInstaller
+    from .models import (
+        AppSettings,
+        LocalProxyCredentials,
+        ProxyRuntimeSession,
+        RuntimeState,
+        ServerEntry,
+        SubscriptionEntry,
+        utc_now_iso,
+    )
+    from .parsers import extract_supported_share_links, is_supported_share_link, parse_share_link
+    from .process_manager import XrayProcessManager
+    from .routing_profiles import RoutingProfileManager
+    from .storage import JsonStorage
+    from .subscriptions import SubscriptionManager
+    from .system_proxy import SystemProxyState, WindowsSystemProxyManager
+    from .utils import (
+        clamp_port,
+        generate_random_password,
+        generate_random_username,
+        pick_random_port,
+        wait_for_port_listener,
+    )
 
 FLAG_EMOJI_PATTERN = re.compile(r"[\U0001F1E6-\U0001F1FF]{2}")
 
@@ -52,18 +110,24 @@ class VynexVpnApp:
         self.console = Console()
         self.storage = JsonStorage()
         self.installer = XrayInstaller()
+        self.app_update_checker = AppUpdateChecker()
         self.subscription_manager = SubscriptionManager(self.storage)
         self.routing_profiles = RoutingProfileManager()
         self.config_builder = XrayConfigBuilder()
         self.process_manager = XrayProcessManager()
         self.health_checker = XrayHealthChecker()
         self.system_proxy_manager = WindowsSystemProxyManager()
+        self.app_release_info: AppReleaseInfo | None = self.app_update_checker.get_cached_release(max_age_seconds=None)
+        self._app_update_thread: threading.Thread | None = None
+        self._proxy_session: ProxyRuntimeSession | None = None
         self.logo = self._load_logo()
 
     def run(self) -> int:
         try:
             self._ensure_xray_ready()
             self._reconcile_runtime_state()
+            self._schedule_app_update_check()
+            self._startup_quick_import_flow()
             while True:
                 self._render_screen()
                 action = self._ask_main_menu()
@@ -119,6 +183,9 @@ class VynexVpnApp:
             MenuAction("Статус", self.status_flow),
             MenuAction("Выход", lambda: None),
         ]
+        update_action = self._app_update_menu_action()
+        if update_action is not None:
+            actions.insert(-1, update_action)
         selected_title = self._select(
             "Главное меню",
             choices=[action.title for action in actions],
@@ -160,7 +227,7 @@ class VynexVpnApp:
             else:
                 self.console.print(
                     Panel.fit(
-                        "Список серверов пуст. Добавьте сервер вручную или через подписку.",
+                        "Список серверов пуст. Используйте быстрый импорт: одна строка для сервера или URL подписки.",
                         title="Менеджер серверов",
                         border_style="yellow",
                     )
@@ -173,7 +240,7 @@ class VynexVpnApp:
                         value=server.id,
                     )
                 )
-            choices.append(Choice(title="Добавить сервер (Ссылка)", value="__add__"))
+            choices.append(Choice(title="Быстрый импорт: сервер / подписка", value="__add__"))
             choices.append(Choice(title="Назад", value="__back__"))
             selected_action = self._select(
                 "Менеджер серверов",
@@ -196,7 +263,7 @@ class VynexVpnApp:
             else:
                 self.console.print(
                     Panel.fit(
-                        "Список подписок пуст. Добавьте первую подписку по URL.",
+                        "Список подписок пуст. Через быстрый импорт можно вставить URL подписки или одиночный сервер.",
                         title="Менеджер подписок",
                         border_style="yellow",
                     )
@@ -209,7 +276,7 @@ class VynexVpnApp:
                         value=subscription.id,
                     )
                 )
-            choices.append(Choice(title="Добавить подписку (URL)", value="__add__"))
+            choices.append(Choice(title="Быстрый импорт: сервер / подписка", value="__add__"))
             if subscriptions:
                 choices.append(Choice(title="Обновить все подписки", value="__refresh_all__"))
             choices.append(Choice(title="Назад", value="__back__"))
@@ -228,19 +295,39 @@ class VynexVpnApp:
                 continue
             self._subscription_details_flow(selected_action)
 
+    def _startup_quick_import_flow(self) -> None:
+        if self.storage.load_servers():
+            return
+        self._show_empty_servers_import_flow(title="Быстрый старт")
+
+    def _show_empty_servers_import_flow(self, *, title: str) -> None:
+        while not self.storage.load_servers():
+            self._render_screen()
+            self.console.print(self._empty_servers_panel(title=title))
+            result = self._quick_import_prompt_flow(
+                "Вставьте ссылку сервера, URL подписки или нажмите Enter для перехода в главное меню:"
+            )
+            if result == "cancelled":
+                return
+
+    def _empty_servers_panel(self, *, title: str) -> Panel:
+        table = Table(show_header=False, box=None, pad_edge=False)
+        table.add_column("Поле", no_wrap=True, style="bold")
+        table.add_column("Значение", overflow="fold", max_width=max(36, self.console.width - 32))
+        table.add_row("Серверов", "0")
+        table.add_row("Подписок", str(len(self.storage.load_subscriptions())))
+        table.add_row("Что делать", "Вставить одну ссылку сервера или URL подписки")
+        table.add_row("Автоопределение", "Алгоритм сам определит подписка это или просто сервер")
+        table.add_row("Подсказка", "Пустой ввод пропустит импорт и откроет главное меню")
+        return Panel.fit(table, title=title, border_style="cyan")
+
     def connect_flow(self) -> None:
         servers = self.storage.load_servers()
         if not servers:
-            self._render_screen()
-            self.console.print(
-                Panel.fit(
-                    "Сначала добавьте хотя бы один сервер вручную или через подписку.",
-                    title="Нет серверов",
-                    border_style="yellow",
-                )
-            )
-            self._pause()
-            return
+            self._show_empty_servers_import_flow(title="Нет серверов")
+            servers = self.storage.load_servers()
+            if not servers:
+                return
         name_width = self._server_name_column_width(servers)
         protocol_width = max((self._display_width(server.protocol.upper()) for server in servers), default=5)
         self._render_screen()
@@ -271,8 +358,7 @@ class VynexVpnApp:
             self._pause()
             return
         mode = "PROXY"
-        socks_port = None
-        http_port = None
+        proxy_session: ProxyRuntimeSession | None = None
         pid: int | None = None
         use_system_proxy = False
         system_proxy_applied = False
@@ -284,14 +370,9 @@ class VynexVpnApp:
                 "Подготовка параметров подключения...",
             )
             settings = self._validated_settings()
-            socks_port = settings.proxy_socks_port
-            http_port = settings.proxy_http_port
+            proxy_session = self._build_runtime_proxy_session()
             self._disconnect_runtime(silent=True)
             self.process_manager.ensure_no_running_instances()
-            if not is_port_available(socks_port):
-                raise ValueError(f"Порт {socks_port} уже занят.")
-            if not is_port_available(http_port):
-                raise ValueError(f"Порт {http_port} уже занят.")
             use_system_proxy = settings.set_system_proxy
             if use_system_proxy:
                 previous_system_proxy = self.system_proxy_manager.snapshot()
@@ -299,22 +380,28 @@ class VynexVpnApp:
                 server=selected_server,
                 mode=mode,
                 routing_profile=routing_profile,
-                socks_port=socks_port,
-                http_port=http_port,
+                socks_port=proxy_session.socks_port,
+                http_port=proxy_session.http_port,
+                socks_credentials=proxy_session.socks_credentials,
             )
-            self.config_builder.write(config, XRAY_CONFIG)
             self._show_connection_progress(
                 self._ui_server_name(selected_server.name),
                 routing_profile.name,
                 "Запуск Xray-core...",
             )
-            pid = self.process_manager.start(XRAY_CONFIG)
+            pid = self.process_manager.start(config)
+            self._show_connection_progress(
+                self._ui_server_name(selected_server.name),
+                routing_profile.name,
+                "Ожидание готовности локального proxy...",
+            )
+            self._wait_for_local_proxy_ready(pid=pid, proxy_session=proxy_session)
             self._show_connection_progress(
                 self._ui_server_name(selected_server.name),
                 routing_profile.name,
                 "Проверка доступности сети через Xray...",
             )
-            health_result = self._run_healthcheck(mode=mode, http_port=http_port)
+            health_result = self._run_healthcheck(mode=mode, http_port=proxy_session.http_port)
             if not health_result.ok:
                 self.process_manager.stop(pid)
                 raise RuntimeError(
@@ -322,36 +409,35 @@ class VynexVpnApp:
                     f"Детали: {health_result.message}"
                 )
             if mode == "PROXY" and use_system_proxy:
-                if http_port is None or socks_port is None:
+                if proxy_session.http_port is None:
                     raise RuntimeError("Для системного proxy не определены локальные порты.")
                 self._show_connection_progress(
                     self._ui_server_name(selected_server.name),
                     routing_profile.name,
                     "Применение системного proxy Windows...",
                 )
-                self.system_proxy_manager.enable_proxy(http_port=http_port, socks_port=socks_port)
+                self.system_proxy_manager.enable_proxy(http_port=proxy_session.http_port)
                 system_proxy_applied = True
             state = RuntimeState(
                 pid=pid,
                 mode=mode,
                 server_id=selected_server.id,
                 started_at=utc_now_iso(),
-                socks_port=socks_port,
-                http_port=http_port,
                 system_proxy_enabled=use_system_proxy,
                 previous_system_proxy=previous_system_proxy.to_dict() if previous_system_proxy else None,
                 routing_profile_id=routing_profile.profile_id,
                 routing_profile_name=routing_profile.name,
             )
             self.storage.save_runtime_state(state)
+            self._proxy_session = proxy_session
             detail_rows = [
                 ("Сервер", self._ui_server_name(selected_server.name)),
                 ("Протокол", selected_server.protocol.upper()),
                 ("Режим", "PROXY"),
                 ("Маршрутизация", routing_profile.name),
                 ("PID", str(pid)),
-                ("SOCKS5", f"127.0.0.1:{socks_port}"),
-                ("HTTP", f"127.0.0.1:{http_port}"),
+                ("Локальный SOCKS5", "включен, учетные данные только в памяти"),
+                ("Локальный HTTP", "включен на случайном порту текущей сессии"),
                 ("Системный proxy", "включен" if use_system_proxy else "не изменялся"),
             ]
             if health_result.checked_url:
@@ -370,6 +456,7 @@ class VynexVpnApp:
                 self.process_manager.stop(pid)
             if system_proxy_applied:
                 self.system_proxy_manager.restore(previous_system_proxy)
+            self._proxy_session = None
             self.storage.save_runtime_state(RuntimeState())
             self._render_screen()
             self._show_error("Ошибка подключения", exc)
@@ -385,16 +472,7 @@ class VynexVpnApp:
         self._disconnect_runtime()
 
     def add_server_flow(self) -> None:
-        link = questionary.text("Вставьте ссылку сервера").ask()
-        if not link:
-            return
-        try:
-            server = self.storage.upsert_server(parse_share_link(link))
-            self._show_server_saved("Сервер сохранен", server)
-        except Exception as exc:  # noqa: BLE001
-            self._render_screen()
-            self._show_error("Ошибка парсинга", exc)
-            self._pause()
+        self._quick_import_prompt_flow("Вставьте ссылку сервера, URL подписки или список ссылок")
 
     def _server_details_flow(self, server_id: str) -> None:
         while True:
@@ -617,30 +695,80 @@ class VynexVpnApp:
         return True
 
     def add_subscription_flow(self) -> None:
-        url = questionary.text("Введите URL подписки").ask()
-        if not url:
+        self._quick_import_prompt_flow("Вставьте URL подписки, ссылку сервера или список ссылок")
+
+    def _quick_import_prompt_flow(self, prompt: str) -> str:
+        raw_value = questionary.text(prompt).ask()
+        if raw_value is None or not raw_value.strip():
+            return "cancelled"
+        try:
+            self._handle_quick_import(raw_value)
+        except Exception as exc:  # noqa: BLE001
+            self._render_screen()
+            self._show_error("Ошибка импорта", exc)
+            self._pause()
+            return "error"
+        return "imported"
+
+    def _handle_quick_import(self, raw_value: str) -> None:
+        import_kind, payload = self._detect_import_target(raw_value)
+        if import_kind == "server":
+            server = self.storage.upsert_server(parse_share_link(payload))
+            self._show_server_saved("Сервер сохранен", server)
             return
-        normalized_url = url.strip()
-        if not normalized_url:
+        if import_kind == "server_bundle":
+            imported = self._import_server_links(payload)
+            self._show_server_batch_saved("Серверы импортированы", imported, source_label="вставленные ссылки")
             return
+
+        normalized_url = payload
         existing = self.storage.get_subscription_by_url(normalized_url)
         default_title = existing.title if existing else self._subscription_default_title(normalized_url)
-        raw_title = questionary.text("Название подписки", default=default_title).ask()
-        if raw_title is None:
-            return
-        title = raw_title or default_title
-        subscription = existing or SubscriptionEntry.new(url=normalized_url, title=title)
+        subscription = existing or SubscriptionEntry.new(url=normalized_url, title=default_title)
         subscription.url = normalized_url
-        subscription.title = title
+        subscription.title = default_title
         try:
             imported = self._refresh_subscription(subscription)
-            self._show_subscription_refresh_success("Подписка сохранена", subscription, imported)
         except Exception as exc:  # noqa: BLE001
             if existing is not None:
                 self._record_subscription_error(existing, exc)
-            self._render_screen()
-            self._show_error("Ошибка подписки", exc)
-            self._pause()
+            raise
+        title = "Подписка обновлена" if existing is not None else "Подписка сохранена"
+        self._show_subscription_refresh_success(title, subscription, imported)
+
+    def _detect_import_target(self, raw_value: str) -> tuple[str, str | list[str]]:
+        normalized = raw_value.strip()
+        if not normalized:
+            raise ValueError("Пустой ввод.")
+        if "\n" not in normalized and "\r" not in normalized and is_supported_share_link(normalized):
+            return "server", normalized
+        parsed = urlparse(normalized)
+        if parsed.scheme.lower() in {"http", "https"} and parsed.netloc:
+            return "subscription", normalized
+        links = extract_supported_share_links(normalized)
+        if not links:
+            raise ValueError(
+                "Не удалось определить формат. Вставьте ссылку vless://, vmess://, ss://, URL подписки или Base64/список ссылок."
+            )
+        if len(links) == 1:
+            return "server", links[0]
+        return "server_bundle", links
+
+    def _import_server_links(self, links: list[str]) -> list[ServerEntry]:
+        imported: list[ServerEntry] = []
+        imported_ids: set[str] = set()
+        for link in links:
+            try:
+                server = self.storage.upsert_server(parse_share_link(link))
+            except ValueError:
+                continue
+            if server.id in imported_ids:
+                continue
+            imported.append(server)
+            imported_ids.add(server.id)
+        if not imported:
+            raise ValueError("Не удалось импортировать ни один сервер из вставленных данных.")
+        return imported
 
     def _subscription_details_flow(self, subscription_id: str) -> None:
         while True:
@@ -834,8 +962,6 @@ class VynexVpnApp:
             selected_action = self._select(
                 "Настройки",
                 choices=[
-                    f"SOCKS порт: {settings.proxy_socks_port}",
-                    f"HTTP порт: {settings.proxy_http_port}",
                     "Системный proxy: Вкл" if settings.set_system_proxy else "Системный proxy: Выкл",
                     f"Набор маршрутизации: {active_routing_name}",
                     "Сбросить системный proxy",
@@ -846,21 +972,7 @@ class VynexVpnApp:
             if selected_action in (None, "Назад"):
                 return
             try:
-                if selected_action.startswith("SOCKS порт:"):
-                    new_port = self._prompt_port("SOCKS порт", settings.proxy_socks_port)
-                    if new_port == settings.proxy_http_port:
-                        raise ValueError("SOCKS и HTTP порты не должны совпадать.")
-                    settings.proxy_socks_port = new_port
-                    self.storage.save_settings(settings)
-                    self._show_settings_saved(settings)
-                elif selected_action.startswith("HTTP порт:"):
-                    new_port = self._prompt_port("HTTP порт", settings.proxy_http_port)
-                    if new_port == settings.proxy_socks_port:
-                        raise ValueError("SOCKS и HTTP порты не должны совпадать.")
-                    settings.proxy_http_port = new_port
-                    self.storage.save_settings(settings)
-                    self._show_settings_saved(settings)
-                elif selected_action.startswith("Системный proxy:"):
+                if selected_action.startswith("Системный proxy:"):
                     system_proxy_answer = questionary.confirm(
                         "Устанавливать Proxy как системный proxy Windows при подключении?",
                         default=settings.set_system_proxy,
@@ -1020,9 +1132,11 @@ class VynexVpnApp:
         settings = self._validated_settings(raise_on_error=False)
         if not state.is_running:
             table = Table(show_header=False, box=None)
+            table.add_row("Версия", f"v{APP_VERSION}")
+            if self._available_app_update() is not None:
+                table.add_row("Обновление", self._available_app_update_label())
             table.add_row("Xray", "Не запущен")
-            table.add_row("SOCKS5", f"127.0.0.1:{settings.proxy_socks_port}")
-            table.add_row("HTTP", f"127.0.0.1:{settings.proxy_http_port}")
+            table.add_row("Локальные порты", "выдаются случайно на время подключения")
             table.add_row("Системный proxy", "Авто" if settings.set_system_proxy else "Выкл")
             table.add_row("Routing", self._active_routing_profile_name())
             self._render_screen()
@@ -1037,6 +1151,9 @@ class VynexVpnApp:
             return
         server = self.storage.get_server(state.server_id) if state.server_id else None
         table = Table(show_header=False, box=None)
+        table.add_row("Версия", f"v{APP_VERSION}")
+        if self._available_app_update() is not None:
+            table.add_row("Обновление", self._available_app_update_label())
         table.add_row("Процесс", "Запущен")
         table.add_row("PID", str(state.pid))
         table.add_row("Режим", state.mode or "-")
@@ -1046,8 +1163,8 @@ class VynexVpnApp:
         table.add_row("Старт", state.started_at or "-")
         table.add_row("Routing", state.routing_profile_name or self._active_routing_profile_name())
         if state.mode == "PROXY":
-            table.add_row("SOCKS5", f"127.0.0.1:{state.socks_port}")
-            table.add_row("HTTP", f"127.0.0.1:{state.http_port}")
+            table.add_row("Локальные порты", "скрыты")
+            table.add_row("SOCKS5", "защищен аутентификацией и не публикуется")
             table.add_row("Системный proxy", "Да" if state.system_proxy_enabled else "Нет")
         self._render_screen()
         self.console.print(Panel.fit(table, title="Статус подключения", border_style="cyan"))
@@ -1065,6 +1182,7 @@ class VynexVpnApp:
     def _current_state(self) -> RuntimeState:
         state = self.storage.load_runtime_state()
         if state.pid and not self.process_manager.is_running(state.pid):
+            self._proxy_session = None
             self._restore_system_proxy(state)
             self.storage.save_runtime_state(RuntimeState())
             return RuntimeState()
@@ -1073,10 +1191,56 @@ class VynexVpnApp:
     def _reconcile_runtime_state(self) -> None:
         self._current_state()
 
+    def _check_app_update(self, *, force: bool = False) -> None:
+        self.app_release_info = self.app_update_checker.check_latest_release(force=force)
+
+    def _schedule_app_update_check(self) -> None:
+        if self.app_update_checker.get_cached_release() is not None:
+            return
+        if self._app_update_thread is not None and self._app_update_thread.is_alive():
+            return
+        self._app_update_thread = threading.Thread(
+            target=self._refresh_app_update_info_in_background,
+            name="vynex-app-update-check",
+            daemon=True,
+        )
+        self._app_update_thread.start()
+
+    def _refresh_app_update_info_in_background(self) -> None:
+        try:
+            self._check_app_update()
+        except Exception:
+            pass
+
+    def _available_app_update(self) -> AppReleaseInfo | None:
+        if self.app_release_info is None:
+            return None
+        if not self.app_release_info.is_update_available:
+            return None
+        if not self.app_release_info.latest_version:
+            return None
+        return self.app_release_info
+
+    def _available_app_update_label(self) -> str:
+        release_info = self._available_app_update()
+        if release_info is None or not release_info.latest_version:
+            return "-"
+        return release_info.latest_version
+
+    def _app_update_menu_action(self) -> MenuAction | None:
+        release_info = self._available_app_update()
+        if release_info is None:
+            return None
+        return MenuAction(
+            f"Скачать обновление: {self._available_app_update_label()}",
+            self.open_app_update_page_flow,
+        )
+
     def _disconnect_runtime(self, *, silent: bool = False) -> None:
         state = self.storage.load_runtime_state()
         if state.pid:
             self.process_manager.stop(state.pid)
+        self._proxy_session = None
         self._restore_system_proxy(state)
         self.storage.save_runtime_state(RuntimeState())
         if not silent:
@@ -1117,6 +1281,9 @@ class VynexVpnApp:
         state = self._current_state()
         settings = self._validated_settings(raise_on_error=False)
         routing_name = escape(self._shorten_text(self._active_routing_profile_name(), 28))
+        update_suffix = ""
+        if self._available_app_update() is not None:
+            update_suffix = f" | [bold yellow]Доступна новая версия:[/bold yellow] v{escape(self._available_app_update_label())}"
         if state.is_running:
             server = self.storage.get_server(state.server_id) if state.server_id else None
             server_name = escape(
@@ -1129,11 +1296,13 @@ class VynexVpnApp:
                 "[bold]Статус:[/bold] [green]Подключено[/green]"
                 f" | [bold]Сервер:[/bold] {server_name}"
                 f" | [bold]Маршрут:[/bold] {routing_name}"
+                f"{update_suffix}"
             )
         proxy_mode = "авто" if settings.set_system_proxy else "выкл"
         return (
             "[bold]Статус:[/bold] [yellow]Не подключено[/yellow]"
             f" | [bold]Маршрут:[/bold] {routing_name}"
+            f"{update_suffix}"
         )
 
     def _banner_border_style(self) -> str:
@@ -1154,6 +1323,43 @@ class VynexVpnApp:
             table.add_row("Детали", details)
         self.console.print(Panel.fit(table, title=title, border_style="red"))
 
+    def open_app_update_page_flow(self) -> None:
+        try:
+            release_info = self._available_app_update()
+            if release_info is None:
+                self._render_screen()
+                self.console.print(Panel.fit("Новая версия не найдена.", border_style="yellow"))
+                self._pause()
+                return
+            release_url = release_info.release_url
+            if not release_url:
+                raise RuntimeError("Не найдена ссылка на релиз приложения.")
+            opened = bool(webbrowser.open(release_url))
+            if not opened and hasattr(os, "startfile"):
+                os.startfile(release_url)
+                opened = True
+            if not opened:
+                raise RuntimeError("Не удалось открыть страницу новой версии в браузере.")
+            table = Table(show_header=False, box=None, pad_edge=False)
+            table.add_column("Параметр", no_wrap=True, style="bold")
+            table.add_column("Значение", overflow="fold", max_width=max(32, self.console.width - 34))
+            table.add_row("Текущая", f"v{APP_VERSION}")
+            table.add_row("Новая", self._available_app_update_label())
+            table.add_row("Ссылка", release_url)
+            self._render_screen()
+            self.console.print(
+                Panel.fit(
+                    table,
+                    title="Открыта страница релиза",
+                    border_style="green",
+                )
+            )
+            self._pause()
+        except Exception as exc:  # noqa: BLE001
+            self._render_screen()
+            self._show_error("Ошибка обновления приложения", exc)
+            self._pause()
+
     def _error_guidance(self, title: str, error: Exception | str) -> tuple[str, list[str], str]:
         details = self._error_text(error)
         normalized = details.lower()
@@ -1163,8 +1369,8 @@ class VynexVpnApp:
                 return (
                     "Локальный proxy-порт уже используется другим приложением.",
                     [
-                        "Откройте 'Настройки' и задайте свободные SOCKS/HTTP порты.",
-                        "Либо закройте приложение, которое уже слушает этот порт, и повторите подключение.",
+                        "Клиент выбирает порты автоматически, поэтому обычно достаточно повторить подключение.",
+                        "Если ошибка повторяется, закройте приложение, которое уже слушает локальный proxy-порт.",
                     ],
                     details,
                 )
@@ -1175,6 +1381,16 @@ class VynexVpnApp:
                         "Попробуйте другой сервер из списка.",
                         "Если проблема повторяется, обновите 'Компоненты' и проверьте доступ в интернет.",
                         "При необходимости временно отключите системный proxy в 'Настройки' и попробуйте снова.",
+                    ],
+                    details,
+                )
+            if "локальные proxy-inbound" in normalized or "локальный proxy" in normalized:
+                return (
+                    "Xray не успел открыть локальные proxy-порты для текущей сессии.",
+                    [
+                        "Повторите подключение: клиент выберет новые случайные порты.",
+                        "Если ошибка повторяется, откройте 'Компоненты' и обновите Xray-core.",
+                        "Если Xray завершился сразу, используйте детали ниже для диагностики конкретной ошибки Xray.",
                     ],
                     details,
                 )
@@ -1246,6 +1462,45 @@ class VynexVpnApp:
                     details,
                 )
 
+        if title == "Ошибка импорта":
+            if "не удалось определить формат" in normalized:
+                return (
+                    "Клиент не смог понять, что именно было вставлено.",
+                    [
+                        "Для одиночного сервера используйте ссылку vless://, vmess:// или ss://.",
+                        "Для подписки используйте URL формата http:// или https://.",
+                        "Также можно вставить Base64-подписку или список share-ссылок построчно.",
+                    ],
+                    details,
+                )
+            if "не удалось загрузить подписку" in normalized:
+                return (
+                    "Клиент не смог скачать содержимое подписки.",
+                    [
+                        "Проверьте URL подписки и доступ в интернет.",
+                        "Если ссылка временно недоступна, повторите попытку позже.",
+                    ],
+                    details,
+                )
+            if "не содержит поддерживаемых ссылок" in normalized:
+                return (
+                    "Подписка загрузилась, но не содержит ссылок, которые поддерживает клиент.",
+                    [
+                        "Убедитесь, что источник содержит vless://, vmess:// или ss:// ссылки.",
+                        "Если провайдер выдает другой формат, такой импорт этим клиентом не поддерживается.",
+                    ],
+                    details,
+                )
+            if "не удалось импортировать ни один сервер" in normalized:
+                return (
+                    "Во вставленных данных не нашлось ни одного корректного сервера.",
+                    [
+                        "Проверьте, что ссылка или список скопированы полностью.",
+                        "Если это подписка, попробуйте вставить ее URL вместо содержимого.",
+                    ],
+                    details,
+                )
+
         if title == "Ошибка подписки":
             if "не удалось загрузить подписку" in normalized:
                 return (
@@ -1278,19 +1533,19 @@ class VynexVpnApp:
         if title == "Ошибка настроек":
             if "не должны совпадать" in normalized:
                 return (
-                    "SOCKS и HTTP порты настроены с конфликтом.",
+                    "Локальные proxy-параметры настроены с конфликтом.",
                     [
-                        "Укажите разные значения для SOCKS и HTTP.",
-                        "Если не уверены, оставьте стандартные 1080 и 1081.",
+                        "Сбросьте настройки клиента и сохраните их заново.",
+                        "При повторении проблемы удалите поврежденный файл настроек клиента.",
                     ],
                     details,
                 )
             if "некоррект" in normalized and "порт" in normalized:
                 return (
-                    "Введено неверное значение локального порта.",
+                    "В настройках клиента обнаружено поврежденное значение локального порта.",
                     [
-                        "Укажите число от 1 до 65535.",
-                        "Используйте свободный порт, который не занят другим приложением.",
+                        "Клиент теперь выбирает порты автоматически, поэтому достаточно пересохранить настройки.",
+                        "Если ошибка повторяется, удалите поврежденный файл настроек и запустите клиент заново.",
                     ],
                     details,
                 )
@@ -1362,6 +1617,17 @@ class VynexVpnApp:
                     details,
                 )
 
+        if title == "Ошибка обновления приложения":
+            if "открыть страницу новой версии" in normalized or "ссылка на релиз" in normalized:
+                return (
+                    "Клиент не смог открыть страницу новой версии в браузере.",
+                    [
+                        "Проверьте, что в системе настроен браузер по умолчанию.",
+                        "Если проблема повторяется, откройте страницу релизов GitHub вручную.",
+                    ],
+                    details,
+                )
+
         return (
             "Операция завершилась с ошибкой.",
             [
@@ -1414,6 +1680,21 @@ class VynexVpnApp:
         table.add_row("Протокол", server.protocol.upper())
         table.add_row("Адрес", f"{server.host}:{server.port}")
         table.add_row("Источник", self._server_source_label(server))
+        self._render_screen()
+        self.console.print(Panel.fit(table, title=title, border_style="green"))
+        self._pause()
+
+    def _show_server_batch_saved(self, title: str, servers: list[ServerEntry], *, source_label: str) -> None:
+        protocols = self.subscription_manager.summarize_protocols(servers)
+        table = Table(show_header=False, box=None, pad_edge=False)
+        table.add_column("Параметр", no_wrap=True, style="bold")
+        table.add_column("Значение", overflow="fold", max_width=max(30, self.console.width - 32))
+        table.add_row("Импортировано", str(len(servers)))
+        table.add_row(
+            "Протоколы",
+            ", ".join(f"{name.upper()}: {count}" for name, count in protocols.items()) or "-",
+        )
+        table.add_row("Источник", source_label)
         self._render_screen()
         self.console.print(Panel.fit(table, title=title, border_style="green"))
         self._pause()
@@ -1634,8 +1915,8 @@ class VynexVpnApp:
         table = Table(show_header=False, box=None, pad_edge=False)
         table.add_column("Параметр", no_wrap=True, style="bold")
         table.add_column("Значение", overflow="fold", max_width=max(28, self.console.width - 34))
-        table.add_row("SOCKS5", f"127.0.0.1:{settings.proxy_socks_port}")
-        table.add_row("HTTP", f"127.0.0.1:{settings.proxy_http_port}")
+        table.add_row("Локальные порты", "случайные и скрыты для каждой сессии")
+        table.add_row("SOCKS5", "включается только с аутентификацией")
         table.add_row("Системный proxy", "включать автоматически" if settings.set_system_proxy else "не изменять")
         table.add_row("Маршрутизация", self._active_routing_profile_name())
 
@@ -1733,19 +2014,39 @@ class VynexVpnApp:
     def _validated_settings(self, *, raise_on_error: bool = True) -> AppSettings:
         settings = self.storage.load_settings()
         try:
-            settings.proxy_socks_port = clamp_port(int(settings.proxy_socks_port))
-            settings.proxy_http_port = clamp_port(int(settings.proxy_http_port))
             settings.set_system_proxy = self._coerce_bool(settings.set_system_proxy)
-            if settings.proxy_socks_port == settings.proxy_http_port:
-                raise ValueError("SOCKS и HTTP порты в настройках не должны совпадать.")
             return settings
         except (TypeError, ValueError) as exc:
             if raise_on_error:
-                raise ValueError(
-                    "Параметры proxy в настройках некорректны. Откройте пункт 'Настройки' и сохраните их заново."
-                ) from exc
+                raise ValueError("Параметры proxy в настройках некорректны.") from exc
             fallback = AppSettings(active_routing_profile_id=settings.active_routing_profile_id)
             return fallback
+
+    def _build_runtime_proxy_session(self) -> ProxyRuntimeSession:
+        used_ports: set[int] = set()
+        http_port = pick_random_port(used_ports=used_ports)
+        used_ports.add(http_port)
+        socks_port = pick_random_port(used_ports=used_ports)
+        return ProxyRuntimeSession(
+            socks_port=socks_port,
+            http_port=http_port,
+            socks_credentials=LocalProxyCredentials(
+                username=generate_random_username(),
+                password=generate_random_password(),
+            ),
+        )
+
+    def _wait_for_local_proxy_ready(self, *, pid: int, proxy_session: ProxyRuntimeSession) -> None:
+        http_ready = wait_for_port_listener(proxy_session.http_port, timeout=12.0)
+        socks_ready = wait_for_port_listener(proxy_session.socks_port, timeout=12.0)
+        if http_ready and socks_ready:
+            return
+        if not self.process_manager.is_running(pid):
+            raise RuntimeError(
+                "Xray завершился до запуска локальных proxy-inbound.\n"
+                f"{self.process_manager.read_recent_output()}"
+            )
+        raise RuntimeError("Xray не открыл локальные proxy-inbound вовремя.")
 
     @staticmethod
     def _coerce_bool(value: object) -> bool:
@@ -1805,3 +2106,7 @@ class VynexVpnApp:
 def main() -> int:
     app = VynexVpnApp()
     return app.run()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

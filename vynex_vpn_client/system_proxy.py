@@ -40,12 +40,14 @@ class WindowsSystemProxyManager:
                 auto_detect=self._read_dword(key, "AutoDetect", 0),
             )
 
-    def enable_proxy(self, *, http_port: int, socks_port: int) -> None:
-        proxy_server = (
-            f"http=127.0.0.1:{http_port};"
-            f"https=127.0.0.1:{http_port};"
-            f"socks=127.0.0.1:{socks_port}"
-        )
+    def enable_proxy(self, *, http_port: int, socks_port: int | None = None) -> None:
+        proxy_entries = [
+            f"http=127.0.0.1:{http_port}",
+            f"https=127.0.0.1:{http_port}",
+        ]
+        if socks_port is not None:
+            proxy_entries.append(f"socks=127.0.0.1:{socks_port}")
+        proxy_server = ";".join(proxy_entries)
         with winreg.OpenKey(
             winreg.HKEY_CURRENT_USER,
             INTERNET_SETTINGS_KEY,

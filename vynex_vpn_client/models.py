@@ -86,8 +86,6 @@ class RuntimeState:
     mode: str | None = None
     server_id: str | None = None
     started_at: str | None = None
-    socks_port: int | None = None
-    http_port: int | None = None
     system_proxy_enabled: bool = False
     previous_system_proxy: dict[str, Any] | None = None
     routing_profile_id: str | None = None
@@ -98,18 +96,38 @@ class RuntimeState:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "RuntimeState":
-        return cls(**data)
+        return cls(
+            pid=data.get("pid"),
+            mode=data.get("mode"),
+            server_id=data.get("server_id"),
+            started_at=data.get("started_at"),
+            system_proxy_enabled=bool(data.get("system_proxy_enabled", False)),
+            previous_system_proxy=data.get("previous_system_proxy"),
+            routing_profile_id=data.get("routing_profile_id"),
+            routing_profile_name=data.get("routing_profile_name"),
+        )
 
     @property
     def is_running(self) -> bool:
         return self.pid is not None
 
 
+@dataclass(frozen=True)
+class LocalProxyCredentials:
+    username: str
+    password: str
+
+
+@dataclass(frozen=True)
+class ProxyRuntimeSession:
+    socks_port: int
+    http_port: int
+    socks_credentials: LocalProxyCredentials
+
+
 @dataclass
 class AppSettings:
     active_routing_profile_id: str = "default"
-    proxy_socks_port: int = 1080
-    proxy_http_port: int = 1081
     set_system_proxy: bool = True
 
     def to_dict(self) -> dict[str, Any]:
@@ -117,4 +135,7 @@ class AppSettings:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AppSettings":
-        return cls(**data)
+        return cls(
+            active_routing_profile_id=data.get("active_routing_profile_id", "default"),
+            set_system_proxy=bool(data.get("set_system_proxy", True)),
+        )

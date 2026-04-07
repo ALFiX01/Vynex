@@ -5,9 +5,8 @@ from typing import Iterable
 import requests
 
 from .models import ServerEntry, SubscriptionEntry, utc_now_iso
-from .parsers import parse_share_link
+from .parsers import extract_supported_share_links, parse_share_link
 from .storage import JsonStorage
-from .utils import decode_base64
 
 
 class SubscriptionManager:
@@ -70,16 +69,10 @@ class SubscriptionManager:
         except requests.RequestException as exc:
             raise RuntimeError(f"Не удалось загрузить подписку: {exc}") from exc
         text = response.content.decode("utf-8-sig", errors="ignore").strip()
-        payload = text if "://" in text else decode_base64(text)
-        links = [line.strip() for line in payload.splitlines() if line.strip()]
-        valid_links = [line for line in links if self._is_supported_link(line)]
+        valid_links = extract_supported_share_links(text)
         if not valid_links:
             raise ValueError("Подписка не содержит поддерживаемых ссылок.")
         return valid_links
-
-    @staticmethod
-    def _is_supported_link(link: str) -> bool:
-        return link.startswith(("vless://", "vmess://", "ss://"))
 
     @staticmethod
     def summarize_protocols(servers: Iterable[ServerEntry]) -> dict[str, int]:

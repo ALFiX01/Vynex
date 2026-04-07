@@ -6,6 +6,25 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from .models import ServerEntry
 from .utils import decode_base64, url_decode
 
+SUPPORTED_SHARE_LINK_PREFIXES = ("vless://", "vmess://", "ss://")
+
+
+def is_supported_share_link(value: str) -> bool:
+    return value.strip().startswith(SUPPORTED_SHARE_LINK_PREFIXES)
+
+
+def extract_supported_share_links(payload: str) -> list[str]:
+    normalized = payload.strip()
+    if not normalized:
+        return []
+    decoded_payload = normalized
+    if "://" not in normalized:
+        try:
+            decoded_payload = decode_base64(normalized)
+        except ValueError:
+            decoded_payload = normalized
+    return [line.strip() for line in decoded_payload.splitlines() if is_supported_share_link(line)]
+
 
 def parse_share_link(
     link: str,

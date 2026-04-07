@@ -2,8 +2,14 @@ from __future__ import annotations
 
 import base64
 import ctypes
+import secrets
 import socket
+import string
+import time
 from urllib.parse import unquote
+
+RUNTIME_PORT_MIN = 20000
+RUNTIME_PORT_MAX = 60000
 
 
 def decode_base64(data: str) -> str:
@@ -44,3 +50,54 @@ def clamp_port(port: int) -> int:
     if not 1 <= port <= 65535:
         raise ValueError("Порт должен быть в диапазоне 1..65535.")
     return port
+
+
+def pick_random_port(
+    *,
+    used_ports: set[int] | None = None,
+    host: str = "127.0.0.1",
+    min_port: int = RUNTIME_PORT_MIN,
+    max_port: int = RUNTIME_PORT_MAX,
+    attempts: int = 128,
+) -> int:
+    occupied = used_ports or set()
+    if min_port > max_port:
+        raise ValueError("Некорректный диапазон портов.")
+    span = max_port - min_port + 1
+    for _ in range(min(attempts, span)):
+        candidate = min_port + secrets.randbelow(span)
+        if candidate in occupied:
+            continue
+        if is_port_available(candidate, host=host):
+            return candidate
+    for candidate in range(min_port, max_port + 1):
+        if candidate in occupied:
+            continue
+        if is_port_available(candidate, host=host):
+            return candidate
+    raise RuntimeError("Не удалось подобрать свободный локальный порт.")
+
+
+def generate_random_username(length: int = 12) -> str:
+    alphabet = string.ascii_lowercase + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(length))
+
+
+def generate_random_password(length: int = 32) -> str:
+    alphabet = string.ascii_letters + string.digits + "-_"
+    return "".join(secrets.choice(alphabet) for _ in range(length))
+
+
+def wait_for_port_listener(
+    port: int,
+    *,
+    host: str = "127.0.0.1",
+    timeout: float = 10.0,
+    interval: float = 0.2,
+) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not is_port_available(port, host=host):
+            return True
+        time.sleep(interval)
+    return not is_port_available(port, host=host)

@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .models import ServerEntry
+from .models import LocalProxyCredentials, ServerEntry
 from .routing_profiles import RoutingProfile
 
 
@@ -17,6 +17,7 @@ class XrayConfigBuilder:
         routing_profile: RoutingProfile,
         socks_port: int | None = None,
         http_port: int | None = None,
+        socks_credentials: LocalProxyCredentials | None = None,
     ) -> dict[str, Any]:
         mode_upper = mode.upper()
         if mode_upper != "PROXY":
@@ -32,9 +33,11 @@ class XrayConfigBuilder:
             ],
             "routing": self._routing_config(routing_profile),
         }
-        if socks_port is None or http_port is None:
-            raise ValueError("Для Proxy режима нужно указать SOCKS и HTTP порты.")
-        config["inbounds"] = self._proxy_inbounds(socks_port=socks_port, http_port=http_port)
+        config["inbounds"] = self._proxy_inbounds(
+            socks_port=socks_port,
+            http_port=http_port,
+            socks_credentials=socks_credentials,
+        )
         return config
 
     @staticmethod
@@ -42,26 +45,51 @@ class XrayConfigBuilder:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    def _proxy_inbounds(self, *, socks_port: int, http_port: int) -> list[dict[str, Any]]:
+    def _proxy_inbounds(
+        self,
+        *,
+        socks_port: int | None,
+        http_port: int | None,
+        socks_credentials: LocalProxyCredentials | None,
+    ) -> list[dict[str, Any]]:
         base_sniffing = {"enabled": True, "destOverride": ["http", "tls", "quic"]}
-        return [
-            {
-                "tag": "socks-in",
-                "listen": "127.0.0.1",
-                "port": socks_port,
-                "protocol": "socks",
-                "settings": {"auth": "noauth", "udp": True},
-                "sniffing": base_sniffing,
-            },
-            {
-                "tag": "http-in",
-                "listen": "127.0.0.1",
-                "port": http_port,
-                "protocol": "http",
-                "settings": {},
-                "sniffing": base_sniffing,
-            },
-        ]
+        inbounds: list[dict[str, Any]] = []
+        if socks_port is not None and socks_credentials is not None:
+            inbounds.append(
+                {
+                    "tag": "socks-in",
+                    "listen": "127.0.0.1",
+                    "port": socks_port,
+                    "protocol": "socks",
+                    "settings": {
+                        "auth": "password",
+                        "udp": True,
+                        "accounts": [
+                            {
+                                "user": socks_credentials.username,
+                                "pass": socks_credentials.password,
+                            }
+                        ],
+                    },
+                    "sniffing": base_sniffing,
+                }
+            )
+        elif socks_port is not None:
+            raise ValueError("SOCKS inbound не может быть запущен без аутентификации.")
+        if http_port is not None:
+            inbounds.append(
+                {
+                    "tag": "http-in",
+                    "listen": "127.0.0.1",
+                    "port": http_port,
+                    "protocol": "http",
+                    "settings": {},
+                    "sniffing": base_sniffing,
+                }
+            )
+        if not inbounds:
+            raise ValueError("Для Proxy режима не настроен ни один локальный inbound.")
+        return inbounds
 
     @staticmethod
     def _dns_config() -> dict[str, Any]:
