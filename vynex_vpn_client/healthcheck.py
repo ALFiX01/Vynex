@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import time
+import asyncio
 from dataclasses import dataclass
 
 import requests
@@ -17,9 +17,7 @@ class HealthcheckResult:
 
 class XrayHealthChecker:
     def __init__(self) -> None:
-        self.session = requests.Session()
-        self.session.trust_env = False
-        self.session.headers.update({"User-Agent": "Vynex-Client/1.0"})
+        self._headers = {"User-Agent": "Vynex-Client/1.0"}
 
     def verify_proxy(
         self,
@@ -57,26 +55,56 @@ class XrayHealthChecker:
         timeout: int,
         request_kwargs: dict,
     ) -> HealthcheckResult:
+        return asyncio.run(
+            self._probe_async(
+                attempts=attempts,
+                timeout=timeout,
+                request_kwargs=request_kwargs,
+            )
+        )
+
+    async def _probe_async(
+        self,
+        *,
+        attempts: int,
+        timeout: int,
+        request_kwargs: dict,
+    ) -> HealthcheckResult:
         errors: list[str] = []
         for attempt in range(1, attempts + 1):
-            for url in HEALTHCHECK_URLS:
-                try:
-                    response = self.session.get(
+            results = await asyncio.gather(
+                *[
+                    asyncio.to_thread(
+                        self._probe_url,
                         url,
-                        timeout=timeout,
-                        allow_redirects=True,
-                        **request_kwargs,
+                        timeout,
+                        request_kwargs,
                     )
-                    if response.ok:
-                        return HealthcheckResult(
-                            ok=True,
-                            message=f"Health-check успешен: {url}",
-                            checked_url=url,
-                        )
-                    errors.append(f"{url}: HTTP {response.status_code}")
-                except requests.RequestException as exc:
-                    errors.append(f"{url}: {exc}")
+                    for url in HEALTHCHECK_URLS
+                ]
+            )
+            for ok, message, checked_url in results:
+                if ok:
+                    return HealthcheckResult(ok=True, message=message, checked_url=checked_url)
+                errors.append(message)
             if attempt < attempts:
-                time.sleep(min(attempt, 2))
+                await asyncio.sleep(min(attempt, 2))
         message = " | ".join(errors[-3:]) if errors else "Сетевой запрос не был выполнен."
         return HealthcheckResult(ok=False, message=message)
+
+    def _probe_url(self, url: str, timeout: int, request_kwargs: dict) -> tuple[bool, str, str | None]:
+        with requests.Session() as session:
+            session.trust_env = False
+            session.headers.update(self._headers)
+            try:
+                response = session.get(
+                    url,
+                    timeout=timeout,
+                    allow_redirects=True,
+                    **request_kwargs,
+                )
+                if response.ok:
+                    return True, f"Health-check успешен: {url}", url
+                return False, f"{url}: HTTP {response.status_code}", None
+            except requests.RequestException as exc:
+                return False, f"{url}: {exc}", None

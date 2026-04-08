@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -28,9 +29,10 @@ class RoutingProfile:
 
 
 class RoutingProfileManager:
+    DOWNLOAD_CONCURRENCY = 4
+
     def __init__(self) -> None:
-        self.session = requests.Session()
-        self.session.headers.update({"User-Agent": "Vynex-Client/1.0"})
+        self._headers = {"User-Agent": "Vynex-Client/1.0"}
         self._profiles_cache: list[RoutingProfile] | None = None
         self._profiles_signature: tuple[tuple[str, int, int], ...] | None = None
         self._ensure_local_defaults()
@@ -80,17 +82,14 @@ class RoutingProfileManager:
 
     def _sync_remote_profiles(self) -> bool:
         try:
-            response = self.session.get(ROUTING_PROFILES_REPO_API, timeout=20)
-            response.raise_for_status()
-            entries = response.json()
+            entries = self._fetch_json(ROUTING_PROFILES_REPO_API)
         except (requests.RequestException, ValueError):
             return False
 
         if not isinstance(entries, list):
             return False
 
-        remote_names: set[str] = set()
-        synced_any = False
+        targets: list[tuple[str, str]] = []
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
@@ -99,11 +98,19 @@ class RoutingProfileManager:
             name = str(entry.get("name", ""))
             if not name.endswith(".json"):
                 continue
-            remote_names.add(name)
             download_url = str(entry.get("download_url") or f"{ROUTING_PROFILES_RAW_BASE}/{name}")
-            try:
-                profile = self._download_remote_profile(download_url)
-            except (requests.RequestException, ValueError, TypeError):
+            targets.append((name, download_url))
+
+        remote_names = {name for name, _ in targets}
+        if not targets:
+            self._remove_missing_managed_profiles(remote_names)
+            self._write_managed_remote_profile_names(remote_names)
+            return True
+
+        results = asyncio.run(self._download_remote_profiles_batch(targets))
+        synced_any = False
+        for name, profile in results:
+            if profile is None:
                 continue
             ROUTING_PROFILES_DIR.joinpath(name).write_text(
                 json.dumps(profile.to_dict(), indent=2, ensure_ascii=False),
@@ -117,12 +124,33 @@ class RoutingProfileManager:
         return True
 
     def _download_remote_profile(self, url: str) -> RoutingProfile:
-        response = self.session.get(url, timeout=20)
-        response.raise_for_status()
-        payload = response.json()
+        payload = self._fetch_json(url)
         if not isinstance(payload, dict):
             raise ValueError("Routing profile payload must be a JSON object.")
         return self._normalize_profile(RoutingProfile.from_dict(payload))
+
+    async def _download_remote_profiles_batch(
+        self,
+        targets: list[tuple[str, str]],
+    ) -> list[tuple[str, RoutingProfile | None]]:
+        semaphore = asyncio.Semaphore(self.DOWNLOAD_CONCURRENCY)
+
+        async def runner(name: str, url: str) -> tuple[str, RoutingProfile | None]:
+            async with semaphore:
+                try:
+                    profile = await asyncio.to_thread(self._download_remote_profile, url)
+                except (requests.RequestException, ValueError, TypeError):
+                    return name, None
+                return name, profile
+
+        return await asyncio.gather(*(runner(name, url) for name, url in targets))
+
+    def _fetch_json(self, url: str) -> Any:
+        with requests.Session() as session:
+            session.headers.update(self._headers)
+            response = session.get(url, timeout=20)
+            response.raise_for_status()
+            return response.json()
 
     @staticmethod
     def _profile_path(profile_id: str) -> Path:

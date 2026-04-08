@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Iterable
 
 import requests
@@ -12,12 +13,18 @@ from .storage import JsonStorage
 class SubscriptionManager:
     def __init__(self, storage: JsonStorage) -> None:
         self.storage = storage
-        self.session = requests.Session()
-        self.session.headers.update({"User-Agent": "Vynex-Client/1.0"})
+        self._headers = {"User-Agent": "Vynex-Client/1.0"}
 
     def import_subscription(self, subscription: SubscriptionEntry) -> list[ServerEntry]:
-        previous_server_ids = set(subscription.server_ids)
         links = self.fetch_subscription_links(subscription.url)
+        return self.import_subscription_links(subscription, links)
+
+    def import_subscription_links(
+        self,
+        subscription: SubscriptionEntry,
+        links: list[str],
+    ) -> list[ServerEntry]:
+        previous_server_ids = set(subscription.server_ids)
         imported: list[ServerEntry] = []
         imported_ids: set[str] = set()
         for link in links:
@@ -47,9 +54,12 @@ class SubscriptionManager:
         success: list[tuple[SubscriptionEntry, int]] = []
         failed: list[tuple[SubscriptionEntry, str]] = []
         subscriptions = self.storage.load_subscriptions()
-        for subscription in subscriptions:
+        fetched_links = asyncio.run(self._fetch_subscription_links_batch(subscriptions))
+        for subscription, links_or_error in zip(subscriptions, fetched_links, strict=False):
             try:
-                imported = self.import_subscription(subscription)
+                if isinstance(links_or_error, Exception):
+                    raise links_or_error
+                imported = self.import_subscription_links(subscription, links_or_error)
                 subscription.updated_at = utc_now_iso()
                 subscription.last_error = None
                 subscription.last_error_at = None
@@ -64,15 +74,32 @@ class SubscriptionManager:
 
     def fetch_subscription_links(self, url: str) -> list[str]:
         try:
-            response = self.session.get(url, timeout=20)
-            response.raise_for_status()
+            text = self._download_subscription_text(url)
         except requests.RequestException as exc:
             raise RuntimeError(f"Не удалось загрузить подписку: {exc}") from exc
-        text = response.content.decode("utf-8-sig", errors="ignore").strip()
         valid_links = extract_supported_share_links(text)
         if not valid_links:
             raise ValueError("Подписка не содержит поддерживаемых ссылок.")
         return valid_links
+
+    async def _fetch_subscription_links_batch(
+        self,
+        subscriptions: list[SubscriptionEntry],
+    ) -> list[list[str] | Exception]:
+        return await asyncio.gather(
+            *[
+                asyncio.to_thread(self.fetch_subscription_links, subscription.url)
+                for subscription in subscriptions
+            ],
+            return_exceptions=True,
+        )
+
+    def _download_subscription_text(self, url: str) -> str:
+        with requests.Session() as session:
+            session.headers.update(self._headers)
+            response = session.get(url, timeout=20)
+            response.raise_for_status()
+            return response.content.decode("utf-8-sig", errors="ignore").strip()
 
     @staticmethod
     def summarize_protocols(servers: Iterable[ServerEntry]) -> dict[str, int]:

@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 APP_NAME = "Vynex VPN Client"
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.4.1"
 APP_RELEASES_API = "https://api.github.com/repos/ALFiX01/Vynex/releases/latest"
 APP_RELEASES_PAGE = "https://github.com/ALFiX01/Vynex/releases/latest"
 APP_DIR = Path(__file__).resolve().parent.parent
@@ -14,12 +14,15 @@ LEGACY_DATA_DIR = APP_DIR / "data"
 LOCAL_APPDATA_DIR = Path(os.environ.get("LOCALAPPDATA", APP_DIR))
 APPDATA_DIR = LOCAL_APPDATA_DIR / "VynexVPNClient"
 DATA_DIR = APPDATA_DIR / "data"
+PROCESS_LOG_DIR = APPDATA_DIR / "logs"
 ROUTING_PROFILES_DIR = DATA_DIR / "routing_profiles"
 XRAY_RUNTIME_DIR = APPDATA_DIR / "xray"
 APP_UPDATE_CACHE_FILE = DATA_DIR / "app_update.json"
 APP_UPDATE_CHECK_TTL_SECONDS = 6 * 60 * 60
 XRAY_EXECUTABLE = XRAY_RUNTIME_DIR / "xray.exe"
 SINGBOX_EXECUTABLE = XRAY_RUNTIME_DIR / "sing-box.exe"
+XRAY_PROCESS_LOG = PROCESS_LOG_DIR / "xray-core.log"
+SINGBOX_PROCESS_LOG = PROCESS_LOG_DIR / "sing-box.log"
 GEOIP_PATH = XRAY_RUNTIME_DIR / "geoip.dat"
 GEOSITE_PATH = XRAY_RUNTIME_DIR / "geosite.dat"
 SERVERS_FILE = DATA_DIR / "servers.json"
