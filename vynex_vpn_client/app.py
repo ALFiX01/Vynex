@@ -48,7 +48,7 @@ if __package__ in {None, ""}:
         utc_now_iso,
     )
     from vynex_vpn_client.parsers import extract_supported_share_links, is_supported_share_link, parse_share_link
-    from vynex_vpn_client.process_manager import SingboxProcessManager, XrayProcessManager
+    from vynex_vpn_client.process_manager import State as XrayState, SingboxProcessManager, XrayProcessManager
     from vynex_vpn_client.routing_profiles import RoutingProfileManager
     from vynex_vpn_client.singbox_config_builder import SingboxConfigBuilder
     from vynex_vpn_client.storage import JsonStorage
@@ -87,7 +87,7 @@ else:
         utc_now_iso,
     )
     from .parsers import extract_supported_share_links, is_supported_share_link, parse_share_link
-    from .process_manager import SingboxProcessManager, XrayProcessManager
+    from .process_manager import State as XrayState, SingboxProcessManager, XrayProcessManager
     from .routing_profiles import RoutingProfileManager
     from .singbox_config_builder import SingboxConfigBuilder
     from .storage import JsonStorage
@@ -122,13 +122,14 @@ class VynexVpnApp:
         self.routing_profiles = RoutingProfileManager()
         self.config_builder = XrayConfigBuilder()
         self.singbox_config_builder = SingboxConfigBuilder()
-        self.process_manager = XrayProcessManager()
+        self.process_manager = XrayProcessManager(on_crash_callback=self._handle_xray_crash)
         self.singbox_process_manager = SingboxProcessManager()
         self.health_checker = XrayHealthChecker()
         self.system_proxy_manager = WindowsSystemProxyManager()
         self.app_release_info: AppReleaseInfo | None = self.app_update_checker.get_cached_release(max_age_seconds=None)
         self._app_update_thread: threading.Thread | None = None
         self._proxy_session: ProxyRuntimeSession | None = None
+        self._runtime_notice: str | None = None
         self.logo = self._load_logo()
 
     def run(self) -> int:
@@ -192,6 +193,16 @@ class VynexVpnApp:
         os.system("cls")
         self._render_banner()
         self.console.print()
+        if self._runtime_notice:
+            self.console.print(
+                Panel.fit(
+                    self._runtime_notice,
+                    title="Подключение остановлено",
+                    border_style="yellow",
+                )
+            )
+            self.console.print()
+            self._runtime_notice = None
         self.console.print()
 
     def _ask_main_menu(self) -> MenuAction | None:
@@ -432,7 +443,7 @@ class VynexVpnApp:
             self._show_connection_progress(
                 self._ui_server_name(selected_server.name),
                 routing_label,
-                "Проверка доступности сети...",
+                " Проверка доступности сети...",
             )
             health_result = self._run_healthcheck(
                 mode=mode,
@@ -1197,12 +1208,16 @@ class VynexVpnApp:
         state = self._current_state()
         settings = self._validated_settings(raise_on_error=False)
         if not state.is_running:
+            default_mode = settings.connection_mode
+            engine_name = "xray" if default_mode == "PROXY" else "sing-box"
+            engine_state_label = self._runtime_engine_state_label(RuntimeState(mode=default_mode))
             table = Table(show_header=False, box=None)
             table.add_row("Версия", f"v{APP_VERSION}")
             if self._available_app_update() is not None:
                 table.add_row("Обновление", self._available_app_update_label())
             table.add_row("Режим по умолчанию", self._connection_mode_label(settings.connection_mode))
             table.add_row("Ядро", "Не запущено")
+            table.add_row(f"Состояние {engine_name}", engine_state_label)
             table.add_row(
                 "Локальные порты",
                 "выдаются случайно на время подключения" if settings.connection_mode == "PROXY" else "не используются",
@@ -1230,8 +1245,8 @@ class VynexVpnApp:
         table.add_row("Версия", f"v{APP_VERSION}")
         if self._available_app_update() is not None:
             table.add_row("Обновление", self._available_app_update_label())
-        table.add_row("Процесс", "Запущен")
-        table.add_row("PID", str(state.pid))
+        table.add_row("Процесс", self._runtime_status_text(state))
+        table.add_row("PID", self._runtime_pid_label(state))
         table.add_row("Режим", state.mode or "-")
         table.add_row("Сервер", self._ui_server_name(server.name) if server else "-")
         table.add_row("Адрес", f"{server.host}:{server.port}" if server else "-")
@@ -1240,11 +1255,13 @@ class VynexVpnApp:
         table.add_row("Routing", state.routing_profile_name or self._active_routing_profile_name())
         if state.mode == "PROXY":
             table.add_row("Ядро", "xray")
+            table.add_row("Состояние xray", self._runtime_engine_state_label(state))
             table.add_row("Локальные порты", "скрыты")
             table.add_row("SOCKS5", "защищен аутентификацией и не публикуется")
             table.add_row("Системный proxy", "Да" if state.system_proxy_enabled else "Нет")
         elif state.mode == "TUN":
             table.add_row("Ядро", "sing-box")
+            table.add_row("Состояние sing-box", self._runtime_engine_state_label(state))
             table.add_row("TUN", "экспериментальный режим активен")
             table.add_row("Конфиг", "отдельный TUN-конфиг")
             table.add_row("Системный proxy", "Нет")
@@ -1263,7 +1280,13 @@ class VynexVpnApp:
 
     def _current_state(self) -> RuntimeState:
         state = self.storage.load_runtime_state()
-        main_dead = bool(state.pid and not self._process_manager_for_mode(state.mode).is_running(state.pid))
+        state = self._sync_runtime_state_with_manager(state)
+        manager = self._process_manager_for_mode(state.mode)
+        main_dead = bool(
+            state.pid
+            and not self._proxy_runtime_recovery_active(state)
+            and not manager.is_running(state.pid)
+        )
         helper_dead = bool(state.helper_pid and not self.process_manager.is_running(state.helper_pid))
         if main_dead or helper_dead:
             self._proxy_session = None
@@ -1350,6 +1373,31 @@ class VynexVpnApp:
         previous_state = SystemProxyState.from_dict(state.previous_system_proxy)
         self.system_proxy_manager.restore(previous_state)
 
+    def _sync_runtime_state_with_manager(self, state: RuntimeState) -> RuntimeState:
+        if not state.is_running:
+            return state
+        manager = self._process_manager_for_mode(state.mode)
+        current_pid = getattr(manager, "pid", None)
+        if current_pid is None or current_pid == state.pid:
+            return state
+        if not manager.is_running(state.pid):
+            return state
+        state.pid = current_pid
+        self.storage.save_runtime_state(state)
+        return state
+
+    def _handle_xray_crash(self) -> None:
+        state = self.storage.load_runtime_state()
+        if str(state.mode or "").upper() != "PROXY":
+            return
+        self._proxy_session = None
+        self._restore_system_proxy(state)
+        self.storage.save_runtime_state(RuntimeState())
+        self._runtime_notice = (
+            "Xray завершился и не смог восстановиться автоматически. "
+            "Подключение сброшено, системный proxy возвращен в прежнее состояние."
+        )
+
     def _get_active_routing_profile(self):
         settings = self.storage.load_settings()
         profile = self.routing_profiles.get_profile(settings.active_routing_profile_id)
@@ -1381,7 +1429,7 @@ class VynexVpnApp:
                 )
             )
             return (
-                "[bold]Статус:[/bold] [green]Подключено[/green]"
+                f"[bold]Статус:[/bold] {self._runtime_status_markup(state)}"
                 f" | [bold]Сервер:[/bold] {server_name}"
                 f" | [bold]Маршрут:[/bold] {routing_name}"
                 f"{update_suffix}"
@@ -1395,6 +1443,74 @@ class VynexVpnApp:
 
     def _banner_border_style(self) -> str:
         return "green" if self._current_state().is_running else "cyan"
+
+    def _runtime_status_markup(self, state: RuntimeState) -> str:
+        if not state.is_running:
+            return "[yellow]Не подключено[/yellow]"
+        if str(state.mode or "").upper() != "PROXY":
+            return "[green]Подключено[/green]"
+        proxy_state = self._proxy_engine_state(state)
+        if proxy_state == XrayState.STARTING:
+            return "[cyan]Xray запускается[/cyan]"
+        if proxy_state == XrayState.CRASHED:
+            return "[yellow]Xray восстанавливается[/yellow]"
+        if proxy_state == XrayState.STOPPING:
+            return "[yellow]Подключение останавливается[/yellow]"
+        return "[green]Подключено[/green]"
+
+    def _runtime_status_text(self, state: RuntimeState) -> str:
+        if not state.is_running:
+            return "Не подключено"
+        if str(state.mode or "").upper() != "PROXY":
+            return "Запущен"
+        proxy_state = self._proxy_engine_state(state)
+        if proxy_state == XrayState.STARTING:
+            return "Запуск Xray"
+        if proxy_state == XrayState.CRASHED:
+            return "Восстановление Xray"
+        if proxy_state == XrayState.STOPPING:
+            return "Остановка подключения"
+        return "Запущен"
+
+    def _runtime_engine_state_label(self, state: RuntimeState) -> str:
+        if str(state.mode or "").upper() == "PROXY":
+            proxy_state = self._proxy_engine_state(state)
+            if proxy_state == XrayState.STARTING:
+                return "Запускается"
+            if proxy_state == XrayState.RUNNING:
+                return "Работает"
+            if proxy_state == XrayState.STOPPING:
+                return "Останавливается"
+            if proxy_state == XrayState.CRASHED:
+                return "Сбой, идет восстановление"
+            return "Остановлено"
+        return "Работает" if state.is_running else "Остановлено"
+
+    def _runtime_pid_label(self, state: RuntimeState) -> str:
+        if str(state.mode or "").upper() == "PROXY":
+            current_pid = self.process_manager.pid
+            if current_pid is not None:
+                return str(current_pid)
+            if self._proxy_engine_state(state) in {XrayState.STARTING, XrayState.CRASHED}:
+                return "перезапуск"
+        return str(state.pid) if state.pid is not None else "-"
+
+    def _proxy_runtime_recovery_active(self, state: RuntimeState) -> bool:
+        if str(state.mode or "").upper() != "PROXY" or not state.is_running:
+            return False
+        return self._proxy_engine_state(state) in {XrayState.STARTING, XrayState.CRASHED, XrayState.STOPPING}
+
+    def _proxy_engine_state(self, state: RuntimeState | None = None) -> XrayState:
+        manager_state = self.process_manager.state
+        if (
+            state is not None
+            and state.is_running
+            and manager_state == XrayState.STOPPED
+            and state.pid is not None
+            and self.process_manager.is_running(state.pid)
+        ):
+            return XrayState.RUNNING
+        return manager_state
 
     def _show_error(self, title: str, error: Exception | str) -> None:
         summary, actions, details = self._error_guidance(title, error)
