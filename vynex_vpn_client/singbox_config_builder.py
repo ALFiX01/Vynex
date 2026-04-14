@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from .models import ServerEntry
+from .constants import LOCAL_PROXY_HOST
+from .models import LocalProxyCredentials, ServerEntry
 
 
 class SingboxConfigBuilder:
@@ -38,8 +39,22 @@ class SingboxConfigBuilder:
     def build_tun(
         self,
         *,
-        server: ServerEntry,
+        server: ServerEntry | None = None,
+        socks_port: int | None = None,
+        socks_credentials: LocalProxyCredentials | None = None,
     ) -> dict[str, Any]:
+        if server is not None:
+            proxy_outbound = self._build_outbound(server)
+            final_outbound = "direct"
+        else:
+            if socks_port is None or socks_credentials is None:
+                raise ValueError("Для TUN режима нужен либо сервер, либо локальный SOCKS backend.")
+            proxy_outbound = self._build_local_socks_outbound(
+                socks_port=socks_port,
+                socks_credentials=socks_credentials,
+            )
+            final_outbound = "proxy"
+
         return {
             "log": {
                 "level": "warn",
@@ -49,7 +64,7 @@ class SingboxConfigBuilder:
                 self._tun_inbound(),
             ],
             "outbounds": [
-                self._build_outbound(server),
+                proxy_outbound,
                 {
                     "type": "direct",
                     "tag": "direct",
@@ -77,7 +92,7 @@ class SingboxConfigBuilder:
                 "auto_detect_interface": True,
                 "default_domain_resolver": "proxy-dns",
                 "rules": self._route_rules(),
-                "final": "direct",
+                "final": final_outbound,
             },
         }
 
@@ -145,6 +160,21 @@ class SingboxConfigBuilder:
             "server_port": server.port,
             "method": extra["method"],
             "password": extra["password"],
+        }
+
+    @staticmethod
+    def _build_local_socks_outbound(
+        *,
+        socks_port: int,
+        socks_credentials: LocalProxyCredentials,
+    ) -> dict[str, Any]:
+        return {
+            "type": "socks",
+            "tag": "proxy",
+            "server": LOCAL_PROXY_HOST,
+            "server_port": socks_port,
+            "username": socks_credentials.username,
+            "password": socks_credentials.password,
         }
 
     def _build_common_transport_settings(self, server: ServerEntry) -> dict[str, Any]:

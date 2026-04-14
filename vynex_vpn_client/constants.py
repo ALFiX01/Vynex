@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 APP_NAME = "Vynex VPN Client"
-APP_VERSION = "0.4.2"
+APP_VERSION = "0.5.0"
 APP_RELEASES_API = "https://api.github.com/repos/ALFiX01/Vynex/releases/latest"
 APP_RELEASES_PAGE = "https://github.com/ALFiX01/Vynex/releases/latest"
 APP_DIR = Path(__file__).resolve().parent.parent
@@ -44,8 +44,8 @@ HEALTHCHECK_URLS = (
     "https://clients3.google.com/generate_204",
     "http://www.msftconnecttest.com/connecttest.txt",
 )
-HEALTHCHECK_ATTEMPTS = 5
-HEALTHCHECK_TIMEOUT = 6
+HEALTHCHECK_ATTEMPTS = 3
+HEALTHCHECK_TIMEOUT = 4
 SUBSCRIPTION_TITLE_BY_HOST = {
     "lovecat.mooo.com": "GoodbyeZapretVPN",
 }

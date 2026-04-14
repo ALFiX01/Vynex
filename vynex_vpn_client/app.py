@@ -47,7 +47,7 @@ if __package__ in {None, ""}:
         SubscriptionEntry,
         utc_now_iso,
     )
-    from vynex_vpn_client.parsers import extract_supported_share_links, is_supported_share_link, parse_share_link
+    from vynex_vpn_client.parsers import is_supported_share_link, parse_server_entries, parse_share_link
     from vynex_vpn_client.process_manager import State as XrayState, SingboxProcessManager, XrayProcessManager
     from vynex_vpn_client.routing_profiles import RoutingProfileManager
     from vynex_vpn_client.singbox_config_builder import SingboxConfigBuilder
@@ -86,7 +86,7 @@ else:
         SubscriptionEntry,
         utc_now_iso,
     )
-    from .parsers import extract_supported_share_links, is_supported_share_link, parse_share_link
+    from .parsers import is_supported_share_link, parse_server_entries, parse_share_link
     from .process_manager import State as XrayState, SingboxProcessManager, XrayProcessManager
     from .routing_profiles import RoutingProfileManager
     from .singbox_config_builder import SingboxConfigBuilder
@@ -207,8 +207,7 @@ class VynexVpnApp:
 
     def _ask_main_menu(self) -> MenuAction | None:
         actions = [
-            MenuAction("Подключиться", self.connect_flow),
-            MenuAction("Отключиться", self.disconnect_flow),
+            self._vpn_toggle_menu_action(),
             MenuAction("Сервера и подписки", self.server_subscription_flow),
             MenuAction("Компоненты", self.components_flow),
             MenuAction("Настройки", self.settings_flow),
@@ -226,6 +225,12 @@ class VynexVpnApp:
         if selected_title is None:
             return None
         return next(action for action in actions if action.title == selected_title)
+
+    def _vpn_toggle_menu_action(self) -> MenuAction:
+        state = self._current_state()
+        if state.is_running:
+            return MenuAction("Отключиться", self.disconnect_flow)
+        return MenuAction("Подключиться", self.connect_flow)
 
     def server_subscription_flow(self) -> None:
         while True:
@@ -619,13 +624,16 @@ class VynexVpnApp:
         self._delete_server_with_prompt(server)
 
     def _rename_server_flow(self, server: ServerEntry) -> None:
-        raw_name = questionary.text("Новое имя сервера", default=server.name).ask()
+        default_name = self._ui_server_name(server.name)
+        raw_name = questionary.text("Новое имя сервера", default=default_name).ask()
         if raw_name is None:
             raise ValueError("Переименование отменено.")
-        new_name = raw_name.strip() or server.name
-        if new_name == server.name:
+        new_name = raw_name.strip()
+        if not new_name or new_name == default_name:
             return
         server.name = new_name
+        if server.source == "subscription":
+            server.extra["custom_name"] = True
         self.storage.upsert_server(server)
         self._show_server_saved("Сервер обновлен", server)
 
@@ -661,7 +669,9 @@ class VynexVpnApp:
         if server.source != "subscription":
             return
         subscription = self.storage.get_subscription(server.subscription_id) if server.subscription_id else None
-        subscription_name = subscription.title if subscription else "неизвестной подписки"
+        subscription_name = (
+            self._ui_subscription_title(subscription.title) if subscription else "неизвестной подписки"
+        )
         self._render_screen()
         should_detach = questionary.confirm(
             f"Отвязать сервер '{self._ui_server_name(server.name)}' от {subscription_name} и оставить как ручной?",
@@ -678,7 +688,10 @@ class VynexVpnApp:
         table = Table(show_header=False, box=None, pad_edge=False)
         table.add_row("Сервер", self._ui_server_name(detached_server.name))
         table.add_row("Источник", "ручной")
-        table.add_row("Подписка", parent_subscription.title if parent_subscription else subscription_name)
+        table.add_row(
+            "Подписка",
+            self._ui_subscription_title(parent_subscription.title) if parent_subscription else subscription_name,
+        )
         self._render_screen()
         self.console.print(
             Panel.fit(
@@ -792,7 +805,7 @@ class VynexVpnApp:
         title = "Подписка обновлена" if existing is not None else "Подписка сохранена"
         self._show_subscription_refresh_success(title, subscription, imported)
 
-    def _detect_import_target(self, raw_value: str) -> tuple[str, str | list[str]]:
+    def _detect_import_target(self, raw_value: str) -> tuple[str, str | list[ServerEntry]]:
         normalized = raw_value.strip()
         if not normalized:
             raise ValueError("Пустой ввод.")
@@ -801,21 +814,19 @@ class VynexVpnApp:
         parsed = urlparse(normalized)
         if parsed.scheme.lower() in {"http", "https"} and parsed.netloc:
             return "subscription", normalized
-        links = extract_supported_share_links(normalized)
-        if not links:
+        servers = parse_server_entries(normalized)
+        if not servers:
             raise ValueError(
-                "Не удалось определить формат. Вставьте ссылку vless://, vmess://, ss://, URL подписки или Base64/список ссылок."
+                "Не удалось определить формат. Вставьте ссылку сервера, URL подписки, Base64, plain-text или JSON подписки."
             )
-        if len(links) == 1:
-            return "server", links[0]
-        return "server_bundle", links
+        return "server_bundle", servers
 
-    def _import_server_links(self, links: list[str]) -> list[ServerEntry]:
+    def _import_server_links(self, links: list[ServerEntry]) -> list[ServerEntry]:
         imported: list[ServerEntry] = []
         imported_ids: set[str] = set()
-        for link in links:
+        for server_entry in links:
             try:
-                server = self.storage.upsert_server(parse_share_link(link))
+                server = self.storage.upsert_server(server_entry)
             except ValueError:
                 continue
             if server.id in imported_ids:
@@ -868,18 +879,22 @@ class VynexVpnApp:
                 self._pause()
 
     def _rename_subscription_flow(self, subscription: SubscriptionEntry) -> None:
-        raw_title = questionary.text("Новое название подписки", default=subscription.title).ask()
+        default_title = self._ui_subscription_title(subscription.title)
+        raw_title = questionary.text(
+            "Новое название подписки",
+            default=default_title,
+        ).ask()
         if raw_title is None:
             raise ValueError("Переименование отменено.")
-        title = raw_title.strip() or subscription.title
-        if title == subscription.title:
+        title = raw_title.strip()
+        if not title or title == default_title:
             return
         subscription.title = title
         self.storage.upsert_subscription(subscription)
         self._render_screen()
         self.console.print(
             Panel.fit(
-                f"Новое название: {subscription.title}",
+                f"Новое название: {self._ui_subscription_title(subscription.title)}",
                 title="Подписка обновлена",
                 border_style="green",
             )
@@ -924,13 +939,13 @@ class VynexVpnApp:
             self.console.print(
                 Panel.fit(
                     "У этой подписки сейчас нет привязанных серверов.",
-                    title=subscription.title,
+                    title=self._ui_subscription_title(subscription.title),
                     border_style="yellow",
                 )
             )
             self._pause()
             return
-        table = Table(title=f"Серверы подписки: {subscription.title}")
+        table = Table(title=f"Серверы подписки: {self._ui_subscription_title(subscription.title)}")
         table.add_column("Имя", overflow="fold", max_width=max(20, self.console.width - 62))
         table.add_column("Протокол", no_wrap=True)
         table.add_column("Адрес", no_wrap=True)
@@ -979,7 +994,7 @@ class VynexVpnApp:
         action_text = "удалить подписку и ее серверы" if remove_servers else "удалить подписку и отвязать серверы"
         self._render_screen()
         should_delete = questionary.confirm(
-            f"Подтвердите: {action_text} '{subscription.title}'?",
+            f"Подтвердите: {action_text} '{self._ui_subscription_title(subscription.title)}'?",
             default=False,
         ).ask()
         if not should_delete:
@@ -997,7 +1012,7 @@ class VynexVpnApp:
 
         result_label = "Удалено серверов" if remove_servers else "Серверов отвязано"
         table = Table(show_header=False, box=None)
-        table.add_row("Подписка", deleted_subscription.title)
+        table.add_row("Подписка", self._ui_subscription_title(deleted_subscription.title))
         table.add_row(result_label, str(affected_servers))
         self._render_screen()
         self.console.print(
@@ -1137,7 +1152,7 @@ class VynexVpnApp:
             table.add_column("Название")
             table.add_column("Серверов")
             for subscription, count in success:
-                table.add_row(subscription.title, str(count))
+                table.add_row(self._ui_subscription_title(subscription.title), str(count))
             self.console.print(table)
         if failed:
             table = Table(title="Ошибки обновления")
@@ -1146,7 +1161,7 @@ class VynexVpnApp:
             table.add_column("Что сделать", overflow="fold", max_width=max(28, self.console.width - 54))
             for subscription, error in failed:
                 _, actions, _ = self._error_guidance("Ошибка подписки", error)
-                table.add_row(subscription.title, error, actions[0] if actions else "-")
+                table.add_row(self._ui_subscription_title(subscription.title), error, actions[0] if actions else "-")
             self.console.print(table)
         if not failed:
             self.console.print(Panel.fit("Все подписки обновлены.", border_style="green"))
@@ -1860,7 +1875,7 @@ class VynexVpnApp:
 
     def _server_name_column_width(self, servers) -> int:
         reserved_width = 24
-        max_name_width = max((self._display_width(server.name) for server in servers), default=12)
+        max_name_width = max((self._display_width(self._ui_server_name(server.name)) for server in servers), default=12)
         available_width = max(18, self.console.width - reserved_width)
         return min(max_name_width, available_width)
 
@@ -1872,7 +1887,8 @@ class VynexVpnApp:
         name_width: int,
         protocol_width: int,
     ) -> str:
-        aligned_name = self._pad_display_width(self._truncate_display_width(server_name, name_width), name_width)
+        safe_server_name = self._ui_server_name(server_name)
+        aligned_name = self._pad_display_width(self._truncate_display_width(safe_server_name, name_width), name_width)
         aligned_protocol = self._pad_display_width(protocol, protocol_width)
         return f"{aligned_name} | {aligned_protocol} | {address}"
 
@@ -1916,7 +1932,7 @@ class VynexVpnApp:
                 server.protocol.upper(),
                 f"{server.host}:{server.port}",
                 self._server_source_label(server),
-                "Активен" if server.id == active_server_id else "Ожидание",
+                self._server_status_label(server, active_server_id=active_server_id),
             )
         return table
 
@@ -1939,11 +1955,15 @@ class VynexVpnApp:
         table.add_row("Протокол", server.protocol.upper())
         table.add_row("Адрес", f"{server.host}:{server.port}")
         table.add_row("Источник", self._server_source_label(server))
+        table.add_row("Статус", self._server_status_label(server, active_server_id=self._current_state().server_id))
         table.add_row("Создан", self._shorten_text(server.created_at, 19))
         if parent_subscription is not None:
-            table.add_row("Подписка", parent_subscription.title)
+            table.add_row("Подписка", self._ui_subscription_title(parent_subscription.title))
         if server.source == "subscription":
-            table.add_row("Примечание", "После обновления подписки параметры сервера могут измениться.")
+            note = "После обновления подписки параметры сервера могут измениться."
+            if server.extra.get("stale"):
+                note = "Сервер исчез из последней версии подписки и сохранен как устаревший."
+            table.add_row("Примечание", note)
         return Panel.fit(
             table,
             title=f"Сервер: {self._ui_server_name(server.name)}",
@@ -1956,7 +1976,7 @@ class VynexVpnApp:
         if server.source == "subscription":
             subscription = self.storage.get_subscription(server.subscription_id) if server.subscription_id else None
             if subscription is not None:
-                return f"подписка ({self._shorten_text(subscription.title, 18)})"
+                return f"подписка ({self._shorten_text(self._ui_subscription_title(subscription.title), 18)})"
             return "подписка"
         return server.source
 
@@ -1968,11 +1988,20 @@ class VynexVpnApp:
         return server.source
 
     @staticmethod
+    def _server_status_label(server: ServerEntry, *, active_server_id: str | None) -> str:
+        if server.id == active_server_id:
+            return "Активен"
+        if server.extra.get("stale"):
+            return "Устарел"
+        return "Ожидание"
+
+    @staticmethod
     def _sorted_servers(servers: list[ServerEntry]) -> list[ServerEntry]:
         return sorted(
             servers,
             key=lambda item: (
                 item.source != "manual",
+                bool(item.extra.get("stale")),
                 item.protocol.lower(),
                 item.name.lower(),
                 item.host.lower(),
@@ -2003,7 +2032,7 @@ class VynexVpnApp:
         table = Table(show_header=False, box=None, pad_edge=False)
         table.add_column("Параметр", no_wrap=True, style="bold")
         table.add_column("Значение", overflow="fold", max_width=max(30, self.console.width - 32))
-        table.add_row("Подписка", subscription.title)
+        table.add_row("Подписка", self._ui_subscription_title(subscription.title))
         table.add_row("Серверов", str(len(imported)))
         table.add_row(
             "Протоколы",
@@ -2045,7 +2074,7 @@ class VynexVpnApp:
         table = Table(show_header=False, box=None, pad_edge=False)
         table.add_column("Параметр", no_wrap=True, style="bold")
         table.add_column("Значение", overflow="fold", max_width=max(34, self.console.width - 34))
-        table.add_row("Название", subscription.title)
+        table.add_row("Название", self._ui_subscription_title(subscription.title))
         table.add_row("URL", subscription.url)
         table.add_row("Серверов", str(len(self._subscription_servers(subscription.id))))
         table.add_row("Обновлено", self._shorten_text(subscription.updated_at, 19))
@@ -2055,7 +2084,7 @@ class VynexVpnApp:
             table.add_row("Когда", self._shorten_text(subscription.last_error_at or "-", 19))
         return Panel.fit(
             table,
-            title=f"Подписка: {subscription.title}",
+            title=f"Подписка: {self._ui_subscription_title(subscription.title)}",
             border_style="yellow" if subscription.last_error else "cyan",
         )
 
@@ -2109,10 +2138,24 @@ class VynexVpnApp:
             country_code = "".join(chr(ord(char) - 0x1F1E6 + ord("A")) for char in pair)
             return f"[{country_code}]"
 
-        return FLAG_EMOJI_PATTERN.sub(replace_flag, value)
+        sanitized = FLAG_EMOJI_PATTERN.sub(replace_flag, value)
+        encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+        safe_chars: list[str] = []
+        for char in sanitized:
+            try:
+                char.encode(encoding)
+            except UnicodeEncodeError:
+                safe_chars.append(f"[U+{ord(char):04X}]")
+            else:
+                safe_chars.append(char)
+        return "".join(safe_chars)
 
     @classmethod
     def _ui_server_name(cls, value: str) -> str:
+        return cls._layout_safe_text(value)
+
+    @classmethod
+    def _ui_subscription_title(cls, value: str) -> str:
         return cls._layout_safe_text(value)
 
     def _show_settings_saved(self, settings: AppSettings) -> None:

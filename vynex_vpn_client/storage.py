@@ -71,7 +71,7 @@ class JsonStorage:
         for index, existing in enumerate(servers):
             if existing.id == server.id:
                 if any(
-                    other.id != server.id and other.raw_link == server.raw_link
+                    server.raw_link and other.id != server.id and other.raw_link == server.raw_link
                     for other in servers
                 ):
                     raise ValueError("Сервер с такой ссылкой уже существует.")
@@ -79,13 +79,14 @@ class JsonStorage:
                 servers[index] = server
                 self.save_servers(servers)
                 return server
-        for index, existing in enumerate(servers):
-            if existing.raw_link == server.raw_link:
-                server.id = existing.id
-                server.created_at = existing.created_at
-                servers[index] = server
-                self.save_servers(servers)
-                return server
+        if server.raw_link:
+            for index, existing in enumerate(servers):
+                if existing.raw_link == server.raw_link:
+                    server.id = existing.id
+                    server.created_at = existing.created_at
+                    servers[index] = server
+                    self.save_servers(servers)
+                    return server
         servers.append(server)
         self.save_servers(servers)
         return server

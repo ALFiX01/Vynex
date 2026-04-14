@@ -1,49 +1,48 @@
 from __future__ import annotations
 
-import asyncio
 from typing import Iterable
 
-import requests
+import httpx
 
 from .models import ServerEntry, SubscriptionEntry, utc_now_iso
-from .parsers import extract_supported_share_links, parse_share_link
+from .parsers import parse_server_entries
 from .storage import JsonStorage
 
 
 class SubscriptionManager:
     def __init__(self, storage: JsonStorage) -> None:
         self.storage = storage
-        self._headers = {"User-Agent": "Vynex-Client/1.0"}
 
     def import_subscription(self, subscription: SubscriptionEntry) -> list[ServerEntry]:
-        links = self.fetch_subscription_links(subscription.url)
-        return self.import_subscription_links(subscription, links)
+        servers = self.fetch_subscription_servers(subscription.url, subscription_id=subscription.id)
+        return self.import_subscription_servers(subscription, servers)
 
-    def import_subscription_links(
+    def import_subscription_servers(
         self,
         subscription: SubscriptionEntry,
-        links: list[str],
+        servers: list[ServerEntry],
     ) -> list[ServerEntry]:
-        previous_server_ids = set(subscription.server_ids)
-        imported: list[ServerEntry] = []
-        imported_ids: set[str] = set()
-        for link in links:
-            try:
-                server = parse_share_link(link, source="subscription", subscription_id=subscription.id)
-            except ValueError:
-                continue
-            saved_server = self.storage.upsert_server(server)
-            if saved_server.id in imported_ids:
-                continue
-            imported.append(saved_server)
-            imported_ids.add(saved_server.id)
-        if not imported:
+        if not servers:
             raise ValueError("Не удалось импортировать ни один сервер из подписки.")
-        subscription.server_ids = [item.id for item in imported]
-        stale_server_ids = previous_server_ids - imported_ids
-        if stale_server_ids:
-            self.storage.remove_servers_by_ids(stale_server_ids, subscription_id=subscription.id)
-        return imported
+
+        current_servers = self._load_subscription_servers(subscription.id)
+        merged = merge_subscription_servers(current_servers, servers)
+        saved_servers: list[ServerEntry] = []
+        saved_ids: set[str] = set()
+
+        for server in merged:
+            saved_server = self.storage.upsert_server(server)
+            if saved_server.id in saved_ids:
+                continue
+            saved_servers.append(saved_server)
+            saved_ids.add(saved_server.id)
+
+        previous_server_ids = set(subscription.server_ids)
+        subscription.server_ids = [item.id for item in saved_servers]
+        orphan_ids = previous_server_ids - saved_ids
+        if orphan_ids:
+            self.storage.remove_servers_by_ids(orphan_ids, subscription_id=subscription.id)
+        return saved_servers
 
     def refresh_all(
         self,
@@ -54,12 +53,9 @@ class SubscriptionManager:
         success: list[tuple[SubscriptionEntry, int]] = []
         failed: list[tuple[SubscriptionEntry, str]] = []
         subscriptions = self.storage.load_subscriptions()
-        fetched_links = asyncio.run(self._fetch_subscription_links_batch(subscriptions))
-        for subscription, links_or_error in zip(subscriptions, fetched_links, strict=False):
+        for subscription in subscriptions:
             try:
-                if isinstance(links_or_error, Exception):
-                    raise links_or_error
-                imported = self.import_subscription_links(subscription, links_or_error)
+                imported = self.import_subscription(subscription)
                 subscription.updated_at = utc_now_iso()
                 subscription.last_error = None
                 subscription.last_error_at = None
@@ -72,34 +68,37 @@ class SubscriptionManager:
                 failed.append((subscription, str(exc)))
         return success, failed
 
-    def fetch_subscription_links(self, url: str) -> list[str]:
+    def fetch_subscription_servers(
+        self,
+        url: str,
+        *,
+        subscription_id: str | None = None,
+    ) -> list[ServerEntry]:
         try:
             text = self._download_subscription_text(url)
-        except requests.RequestException as exc:
+        except httpx.HTTPError as exc:
             raise RuntimeError(f"Не удалось загрузить подписку: {exc}") from exc
-        valid_links = extract_supported_share_links(text)
-        if not valid_links:
-            raise ValueError("Подписка не содержит поддерживаемых ссылок.")
-        return valid_links
-
-    async def _fetch_subscription_links_batch(
-        self,
-        subscriptions: list[SubscriptionEntry],
-    ) -> list[list[str] | Exception]:
-        return await asyncio.gather(
-            *[
-                asyncio.to_thread(self.fetch_subscription_links, subscription.url)
-                for subscription in subscriptions
-            ],
-            return_exceptions=True,
-        )
+        servers = parse_server_entries(text, source="subscription", subscription_id=subscription_id)
+        if not servers:
+            raise ValueError("Подписка не содержит поддерживаемых серверов.")
+        return servers
 
     def _download_subscription_text(self, url: str) -> str:
-        with requests.Session() as session:
-            session.headers.update(self._headers)
-            response = session.get(url, timeout=20)
-            response.raise_for_status()
-            return response.content.decode("utf-8-sig", errors="ignore").strip()
+        response = httpx.get(
+            url,
+            headers={"User-Agent": "v2rayN/6.0"},
+            follow_redirects=True,
+            timeout=15,
+        )
+        response.raise_for_status()
+        return response.text.strip()
+
+    def _load_subscription_servers(self, subscription_id: str) -> list[ServerEntry]:
+        return [
+            server
+            for server in self.storage.load_servers()
+            if server.source == "subscription" and server.subscription_id == subscription_id
+        ]
 
     @staticmethod
     def summarize_protocols(servers: Iterable[ServerEntry]) -> dict[str, int]:
@@ -107,3 +106,42 @@ class SubscriptionManager:
         for server in servers:
             counters[server.protocol] = counters.get(server.protocol, 0) + 1
         return counters
+
+
+def merge_subscription_servers(old: list[ServerEntry], fresh: list[ServerEntry]) -> list[ServerEntry]:
+    old_by_key = {_server_key(server): server for server in old}
+    fresh_by_key = {_server_key(server): server for server in fresh}
+    merged: list[ServerEntry] = []
+
+    for server in fresh:
+        key = _server_key(server)
+        previous = old_by_key.get(key)
+        if previous is None:
+            merged.append(server)
+            continue
+
+        updated = ServerEntry.from_dict(server.to_dict())
+        updated.id = previous.id
+        updated.created_at = previous.created_at
+        updated.raw_link = server.raw_link or previous.raw_link
+        updated.name = previous.name if previous.extra.get("custom_name") is True else server.name
+        updated.extra = dict(previous.extra)
+        updated.extra.update(server.extra)
+        updated.extra.pop("stale", None)
+        merged.append(updated)
+
+    for server in old:
+        key = _server_key(server)
+        if key in fresh_by_key:
+            continue
+        stale = ServerEntry.from_dict(server.to_dict())
+        stale.extra = dict(server.extra)
+        stale.extra["stale"] = True
+        merged.append(stale)
+
+    return merged
+
+
+def _server_key(server: ServerEntry) -> tuple[str, int, str]:
+    credential = str(server.extra.get("id") or "") or str(server.extra.get("password") or "")
+    return (server.host.lower(), server.port, credential)

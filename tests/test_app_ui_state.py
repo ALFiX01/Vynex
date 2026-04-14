@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from unittest.mock import Mock
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from vynex_vpn_client.app import VynexVpnApp
 from vynex_vpn_client.models import AppSettings, RuntimeState, ServerEntry
@@ -70,3 +71,19 @@ def test_runtime_pid_label_shows_restart_marker_while_xray_recovers() -> None:
     app = _make_app(runtime_state=state, manager_state=XrayState.CRASHED, manager_pid=None)
 
     assert app._runtime_pid_label(state) == "перезапуск"
+
+
+def test_ui_server_name_is_safe_for_cp1251_console() -> None:
+    with patch("vynex_vpn_client.app.sys.stdout", SimpleNamespace(encoding="cp1251")):
+        value = VynexVpnApp._ui_server_name("vmess (🇷🇺 game) 🚀")
+
+    assert value == "vmess ([RU] game) [U+1F680]"
+
+
+def test_server_choice_title_uses_console_safe_name() -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+
+    with patch("vynex_vpn_client.app.sys.stdout", SimpleNamespace(encoding="cp1251")):
+        title = app._server_choice_title("srv 🚀", "VMESS", "example.com:443", 20, 5)
+
+    assert "[U+1F680]" in title
