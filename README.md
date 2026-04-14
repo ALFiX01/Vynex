@@ -1,6 +1,6 @@
 <div align="center">
   
-# Vynex VPN Client
+# Vynex
 
 </div>  
 
