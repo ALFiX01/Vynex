@@ -1,4 +1,9 @@
+<div align="center">
+  
 # Vynex VPN Client
+
+</div>  
+
   <p align="center">
     <a href="https://github.com/ALFiX01/Vynex/releases/latest"><img src="https://img.shields.io/github/v/release/ALFiX01/Vynex?style=plastic" alt="GitHub Release"></a>
     <a href="https://github.com/ALFiX01/Vynex/stargazers"><img src="https://img.shields.io/github/stars/ALFiX01/Vynex?style=plastic" alt="GitHub Stars"></a>
