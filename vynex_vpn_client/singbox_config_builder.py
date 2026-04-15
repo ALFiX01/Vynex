@@ -114,6 +114,8 @@ class SingboxConfigBuilder:
             return self._build_vless_outbound(server)
         if protocol == "vmess":
             return self._build_vmess_outbound(server)
+        if protocol == "trojan":
+            return self._build_trojan_outbound(server)
         if protocol == "ss":
             return self._build_shadowsocks_outbound(server)
         raise ValueError(f"Неподдерживаемый протокол для sing-box: {server.protocol}")
@@ -149,6 +151,19 @@ class SingboxConfigBuilder:
         if alter_id > 0:
             outbound["alter_id"] = alter_id
         return outbound
+
+    def _build_trojan_outbound(self, server: ServerEntry) -> dict[str, Any]:
+        extra = server.extra
+        if not extra.get("password"):
+            raise ValueError("Для Trojan в TUN режиме требуется пароль.")
+        return {
+            "type": "trojan",
+            "tag": "proxy",
+            "server": server.host,
+            "server_port": server.port,
+            "password": extra["password"],
+            **self._build_common_transport_settings(server),
+        }
 
     @staticmethod
     def _build_shadowsocks_outbound(server: ServerEntry) -> dict[str, Any]:

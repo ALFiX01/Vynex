@@ -36,6 +36,44 @@ class XrayConfigBuilderTests(unittest.TestCase):
         self.assertEqual(len(config["inbounds"]), 2)
         self.assertTrue(all(inbound["listen"] == LOCAL_PROXY_HOST for inbound in config["inbounds"]))
 
+    def test_build_supports_trojan_outbound(self) -> None:
+        builder = XrayConfigBuilder()
+        config = builder.build(
+            server=ServerEntry.new(
+                name="trojan",
+                protocol="trojan",
+                host="trojan.example.com",
+                port=443,
+                raw_link="trojan://secret@trojan.example.com:443?type=ws&security=tls&host=cdn.example.com&path=%2Fws&sni=edge.example.com#trojan",
+                extra={
+                    "password": "secret",
+                    "network": "ws",
+                    "security": "tls",
+                    "host": "cdn.example.com",
+                    "path": "/ws",
+                    "sni": "edge.example.com",
+                },
+            ),
+            mode="proxy",
+            routing_profile=RoutingProfile(
+                profile_id="test",
+                name="test",
+                description="test",
+                rules=[],
+            ),
+            socks_port=1080,
+            http_port=8080,
+            socks_credentials=LocalProxyCredentials(username="user", password="pass"),
+        )
+
+        outbound = config["outbounds"][0]
+        self.assertEqual(outbound["protocol"], "trojan")
+        self.assertEqual(outbound["settings"]["servers"][0]["password"], "secret")
+        self.assertEqual(outbound["streamSettings"]["security"], "tls")
+        self.assertEqual(outbound["streamSettings"]["tlsSettings"]["serverName"], "edge.example.com")
+        self.assertEqual(outbound["streamSettings"]["wsSettings"]["path"], "/ws")
+        self.assertEqual(outbound["streamSettings"]["wsSettings"]["headers"]["Host"], "cdn.example.com")
+
 
 class SingboxConfigBuilderTests(unittest.TestCase):
     def test_tun_config_routes_into_local_socks_backend(self) -> None:
@@ -53,6 +91,36 @@ class SingboxConfigBuilderTests(unittest.TestCase):
         self.assertEqual(config["outbounds"][0]["server_port"], 1080)
         self.assertEqual(config["outbounds"][0]["username"], "user")
         self.assertEqual(config["route"]["final"], "proxy")
+
+    def test_tun_config_supports_trojan_server(self) -> None:
+        builder = SingboxConfigBuilder()
+        config = builder.build_tun(
+            server=ServerEntry.new(
+                name="trojan",
+                protocol="trojan",
+                host="trojan.example.com",
+                port=443,
+                raw_link="trojan://secret@trojan.example.com:443?type=ws&security=tls&host=cdn.example.com&path=%2Fws&sni=edge.example.com#trojan",
+                extra={
+                    "password": "secret",
+                    "network": "ws",
+                    "security": "tls",
+                    "host": "cdn.example.com",
+                    "path": "/ws",
+                    "sni": "edge.example.com",
+                },
+            ),
+        )
+
+        outbound = config["outbounds"][0]
+        self.assertEqual(outbound["type"], "trojan")
+        self.assertEqual(outbound["password"], "secret")
+        self.assertTrue(outbound["tls"]["enabled"])
+        self.assertEqual(outbound["tls"]["server_name"], "edge.example.com")
+        self.assertEqual(outbound["transport"]["type"], "ws")
+        self.assertEqual(outbound["transport"]["path"], "/ws")
+        self.assertEqual(outbound["transport"]["headers"]["Host"], "cdn.example.com")
+        self.assertEqual(config["route"]["final"], "direct")
 
 
 if __name__ == "__main__":

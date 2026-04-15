@@ -115,6 +115,8 @@ class XrayConfigBuilder:
             return self._build_vless_outbound(server)
         if protocol == "vmess":
             return self._build_vmess_outbound(server)
+        if protocol == "trojan":
+            return self._build_trojan_outbound(server)
         if protocol == "ss":
             return self._build_shadowsocks_outbound(server)
         raise ValueError(f"Неподдерживаемый протокол: {server.protocol}")
@@ -172,6 +174,31 @@ class XrayConfigBuilder:
                                 "security": extra.get("security", "auto"),
                             }
                         ],
+                    }
+                ]
+            },
+            "streamSettings": stream_settings,
+        }
+
+    def _build_trojan_outbound(self, server: ServerEntry) -> dict[str, Any]:
+        extra = server.extra
+        if not extra.get("password"):
+            raise ValueError("Для Trojan требуется пароль.")
+        stream_settings = self._build_stream_settings(
+            network=extra.get("network", "tcp"),
+            security=extra.get("security", "tls"),
+            server=server,
+            extra=extra,
+        )
+        return {
+            "tag": "proxy",
+            "protocol": "trojan",
+            "settings": {
+                "servers": [
+                    {
+                        "address": server.host,
+                        "port": server.port,
+                        "password": extra["password"],
                     }
                 ]
             },
