@@ -510,6 +510,9 @@ class XrayProcessManager(_BaseProcessManager):
         with self._lock:
             return self._state
 
+    def status(self) -> State:
+        return self.state
+
     @property
     def pid(self) -> int | None:
         with self._lock:
@@ -570,6 +573,10 @@ class XrayProcessManager(_BaseProcessManager):
             self._managed_ports = ()
 
         self._cleanup_temp_config()
+
+    def restart(self, config: dict[str, Any]) -> int:
+        self.stop(self.pid)
+        return self.start(config)
 
     def is_running(self, pid: int | None) -> bool:
         with self._lock:
@@ -637,6 +644,14 @@ class XrayProcessManager(_BaseProcessManager):
             tail = list(self._recent_output)[-limit:]
         output = "\n".join(tail)
         return output or self._immediate_exit_message
+
+    def collect_output(self, limit: int = 50) -> dict[str, tuple[str, ...]]:
+        with self._lock:
+            stderr_tail = tuple(list(self._recent_output)[-limit:])
+        return {
+            "stdout": (),
+            "stderr": stderr_tail,
+        }
 
     def iter_logs(self) -> Generator[str, None, None]:
         while True:

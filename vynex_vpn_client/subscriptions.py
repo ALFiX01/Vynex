@@ -143,5 +143,4 @@ def merge_subscription_servers(old: list[ServerEntry], fresh: list[ServerEntry])
 
 
 def _server_key(server: ServerEntry) -> tuple[str, int, str]:
-    credential = str(server.extra.get("id") or "") or str(server.extra.get("password") or "")
-    return (server.host.lower(), server.port, credential)
+    return (server.host.lower(), server.port, server.identity_token)

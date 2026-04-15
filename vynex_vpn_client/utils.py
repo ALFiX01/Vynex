@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import ctypes
 from dataclasses import dataclass
+import ipaddress
 import json
 import secrets
 import socket
@@ -188,6 +189,18 @@ def _run_powershell_json(command: str) -> object | None:
         return None
 
 
+def _json_string_list(payload: object | None) -> tuple[str, ...]:
+    if payload is None:
+        return ()
+    items = payload if isinstance(payload, list) else [payload]
+    values: list[str] = []
+    for item in items:
+        text = str(item).strip()
+        if text and text not in values:
+            values.append(text)
+    return tuple(values)
+
+
 def get_active_ipv4_interface(*, exclude_aliases: set[str] | None = None) -> WindowsInterfaceDetails | None:
     excluded = sorted(alias for alias in (exclude_aliases or set()) if alias)
     escaped_excluded = ", ".join(_single_quoted_powershell(alias) for alias in excluded)
@@ -310,3 +323,75 @@ def remove_ipv4_route(
         command += f" | Where-Object {{ $_.NextHop -eq {_single_quoted_powershell(next_hop)} }}"
     command += "; if ($route) { $route | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue | Out-Null }"
     _run_powershell(command)
+
+
+def get_interface_ipv4_addresses(
+    interface_name: str,
+    *,
+    allow_link_local: bool = True,
+) -> tuple[str, ...]:
+    escaped_name = interface_name.replace("'", "''")
+    ip_filter = "$true" if allow_link_local else "$_.IPAddress -notlike '169.254.*'"
+    command = (
+        f"Get-NetIPAddress -InterfaceAlias '{escaped_name}' -AddressFamily IPv4 "
+        "-ErrorAction SilentlyContinue | "
+        f"Where-Object {{ $_.IPAddress -ne '127.0.0.1' -and {ip_filter} }} | "
+        "Select-Object -ExpandProperty IPAddress | ConvertTo-Json -Compress"
+    )
+    return _json_string_list(_run_powershell_json(command))
+
+
+def get_interface_dns_servers(interface_name: str) -> tuple[str, ...]:
+    escaped_name = interface_name.replace("'", "''")
+    command = (
+        f"Get-DnsClientServerAddress -InterfaceAlias '{escaped_name}' -AddressFamily IPv4 "
+        "-ErrorAction SilentlyContinue | "
+        "Select-Object -ExpandProperty ServerAddresses | ConvertTo-Json -Compress"
+    )
+    return _json_string_list(_run_powershell_json(command))
+
+
+def get_interface_ipv4_route_prefixes(
+    *,
+    interface_name: str | None = None,
+    interface_index: int | None = None,
+) -> tuple[str, ...]:
+    filters = ["-AddressFamily IPv4"]
+    if interface_name is not None:
+        filters.append(f"-InterfaceAlias {_single_quoted_powershell(interface_name)}")
+    if interface_index is not None:
+        filters.append(f"-InterfaceIndex {int(interface_index)}")
+    command = (
+        f"Get-NetRoute {' '.join(filters)} -ErrorAction SilentlyContinue | "
+        "Where-Object { $_.DestinationPrefix -and $_.State -ne 'Invalid' } | "
+        "Select-Object -ExpandProperty DestinationPrefix | Sort-Object -Unique | "
+        "ConvertTo-Json -Compress"
+    )
+    return _json_string_list(_run_powershell_json(command))
+
+
+def reset_interface_dns_servers(interface_name: str) -> None:
+    escaped_name = interface_name.replace("'", "''")
+    command = (
+        f"Set-DnsClientServerAddress -InterfaceAlias '{escaped_name}' "
+        "-ResetServerAddresses -ErrorAction SilentlyContinue | Out-Null"
+    )
+    _run_powershell(command)
+
+
+def remove_interface_ipv4_addresses(interface_name: str, addresses: list[str] | tuple[str, ...]) -> None:
+    escaped_name = interface_name.replace("'", "''")
+    for raw_address in addresses:
+        try:
+            address = ipaddress.ip_interface(str(raw_address).strip())
+        except ValueError:
+            continue
+        if address.version != 4:
+            continue
+        command = (
+            f"Remove-NetIPAddress -InterfaceAlias '{escaped_name}' "
+            f"-IPAddress {_single_quoted_powershell(str(address.ip))} "
+            f"-PrefixLength {int(address.network.prefixlen)} "
+            "-Confirm:$false -ErrorAction SilentlyContinue | Out-Null"
+        )
+        _run_powershell(command)

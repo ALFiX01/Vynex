@@ -13,6 +13,10 @@ datas = []
 datas += collect_data_files("questionary")
 datas += collect_data_files("rich")
 datas += [("logo.txt", ".")]
+for runtime_binary_name in ("amneziawg.exe", "awg.exe"):
+    runtime_binary = project_dir / runtime_binary_name
+    if runtime_binary.exists():
+        datas.append((str(runtime_binary), "."))
 
 hiddenimports = []
 hiddenimports += collect_submodules("questionary")

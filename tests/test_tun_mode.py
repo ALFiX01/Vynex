@@ -13,6 +13,7 @@ def _make_app() -> VynexVpnApp:
     app = object.__new__(VynexVpnApp)
     app.config_builder = XrayConfigBuilder()
     app.process_manager = Mock()
+    app.amneziawg_network_integration = Mock()
     return app
 
 
@@ -41,6 +42,20 @@ def test_prepare_tun_prerequisites_requires_active_ipv4_interface() -> None:
             assert "активный IPv4 интерфейс" in str(exc)
         else:
             raise AssertionError("Expected RuntimeError when no outbound interface is available")
+
+
+def test_prepare_tun_prerequisites_skips_outbound_lookup_for_amneziawg() -> None:
+    app = _make_app()
+    backend = Mock()
+    backend.backend_id = "amneziawg"
+
+    with (
+        patch("vynex_vpn_client.app.is_running_as_admin", return_value=True),
+        patch("vynex_vpn_client.app.get_active_ipv4_interface") as get_active_interface,
+    ):
+        assert app._prepare_tun_prerequisites(backend=backend) is None
+
+    get_active_interface.assert_not_called()
 
 
 def test_wait_for_tun_ready_returns_interface_details() -> None:
@@ -90,6 +105,19 @@ def test_cleanup_tun_routes_removes_all_prefixes() -> None:
         call("0.0.0.0/1", interface_index=17, next_hop="169.254.20.7"),
         call("128.0.0.0/1", interface_index=17, next_hop="169.254.20.7"),
     ]
+
+
+def test_cleanup_tun_state_delegates_awg_cleanup_to_network_layer() -> None:
+    app = _make_app()
+    state = RuntimeState(
+        backend_id="amneziawg",
+        mode="TUN",
+        tun_interface_name="office-awg",
+    )
+
+    app._cleanup_tun_state(state)
+
+    app.amneziawg_network_integration.cleanup_runtime_state.assert_called_once_with(state)
 
 
 def test_failed_healthcheck_in_tun_mode_becomes_warning() -> None:

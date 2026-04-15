@@ -7,8 +7,11 @@ import re
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse, urlsplit
 
+from .amneziawg import try_parse_amneziawg_config_file, try_parse_amneziawg_config_text
 from .models import ServerEntry
 from .utils import url_decode
+from .vpn_uri import import_vpn_uri, is_vpn_uri
+from .xray_import import is_probable_xray_config_data, parse_xray_json_config
 
 logger = logging.getLogger(__name__)
 
@@ -68,8 +71,16 @@ def _auto_parse(
     if not body:
         return []
 
-    if body.startswith("{") or body.startswith("["):
-        return _parse_json(body, source=source, subscription_id=subscription_id)
+    awg_from_file = try_parse_amneziawg_config_file(
+        body,
+        source=source,
+        subscription_id=subscription_id,
+    )
+    if awg_from_file is not None:
+        return [awg_from_file]
+
+    if is_vpn_uri(body):
+        return [import_vpn_uri(body, source=source, subscription_id=subscription_id)]
 
     if len(body) > 20 and _BASE64_BODY_RE.fullmatch(body):
         try:
@@ -77,9 +88,27 @@ def _auto_parse(
         except Exception:
             logger.debug("Payload is not valid base64", exc_info=True)
         else:
+            awg_from_base64 = try_parse_amneziawg_config_text(
+                decoded,
+                source=source,
+                subscription_id=subscription_id,
+            )
+            if awg_from_base64 is not None:
+                return [awg_from_base64]
             parsed = _parse_plain(decoded, source=source, subscription_id=subscription_id)
             if parsed:
                 return parsed
+
+    awg_from_text = try_parse_amneziawg_config_text(
+        body,
+        source=source,
+        subscription_id=subscription_id,
+    )
+    if awg_from_text is not None:
+        return [awg_from_text]
+
+    if body.startswith("{") or body.startswith("["):
+        return _parse_json(body, source=source, subscription_id=subscription_id)
 
     return _parse_plain(body, source=source, subscription_id=subscription_id)
 
@@ -94,6 +123,12 @@ def _parse_plain(
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#"):
+            continue
+        if is_vpn_uri(line):
+            try:
+                servers.append(import_vpn_uri(line, source=source, subscription_id=subscription_id))
+            except ValueError:
+                logger.debug("Skipping malformed vpn:// payload", exc_info=True)
             continue
         server = _parse_uri(
             line,
@@ -275,6 +310,8 @@ def _parse_shadowsocks(link: str, *, source: str, subscription_id: str | None) -
 def _parse_json(body: str, *, source: str, subscription_id: str | None) -> list[ServerEntry]:
     data = json.loads(body)
     if isinstance(data, dict):
+        if is_probable_xray_config_data(data):
+            return _deduplicate(parse_xray_json_config(data, source=source, subscription_id=subscription_id))
         if "outbounds" in data:
             return _deduplicate(_from_singbox(data.get("outbounds") or [], source=source, subscription_id=subscription_id))
         if "proxies" in data:
@@ -491,5 +528,4 @@ def _deduplicate(servers: list[ServerEntry]) -> list[ServerEntry]:
 
 
 def _server_identity(server: ServerEntry) -> tuple[str, int, str]:
-    credential = str(server.extra.get("id") or "") or str(server.extra.get("password") or "")
-    return (server.host.lower(), server.port, credential)
+    return (server.host.lower(), server.port, server.identity_token)

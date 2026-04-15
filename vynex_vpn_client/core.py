@@ -9,6 +9,13 @@ from pathlib import Path
 import requests
 
 from .constants import (
+    AMNEZIAWG_BUNDLED_FILES,
+    AMNEZIAWG_EXECUTABLE,
+    AMNEZIAWG_EXECUTABLE_DOWNLOAD_URL,
+    AMNEZIAWG_EXECUTABLE_FALLBACK,
+    AMNEZIAWG_EXECUTABLE_FALLBACK_DOWNLOAD_URL,
+    AMNEZIAWG_RUNTIME_DIR,
+    AMNEZIAWG_WINTUN_DLL,
     APP_DIR,
     DATA_DIR,
     GEOIP_DOWNLOAD_URL,
@@ -18,6 +25,8 @@ from .constants import (
     SINGBOX_ARCHIVE_PATH,
     SINGBOX_EXECUTABLE,
     SINGBOX_RELEASES_API,
+    WINTUN_ARCHIVE_PATH,
+    WINTUN_DOWNLOAD_URL,
     WINTUN_DLL,
     XRAY_ARCHIVE_PATH,
     XRAY_BUNDLED_FILES,
@@ -73,6 +82,15 @@ class XrayInstaller:
             )
         return XRAY_EXECUTABLE
 
+    def ensure_amneziawg_runtime(self) -> Path:
+        self.warnings = []
+        self._prepare_runtime_dirs()
+        self._copy_bundled_amneziawg_runtime()
+        if self._has_complete_amneziawg_runtime():
+            return AMNEZIAWG_EXECUTABLE if AMNEZIAWG_EXECUTABLE.exists() else AMNEZIAWG_EXECUTABLE_FALLBACK
+        self.update_amneziawg()
+        return AMNEZIAWG_EXECUTABLE if AMNEZIAWG_EXECUTABLE.exists() else AMNEZIAWG_EXECUTABLE_FALLBACK
+
     def update_xray(self) -> Path:
         self.warnings = []
         self._prepare_runtime_dirs()
@@ -96,10 +114,21 @@ class XrayInstaller:
         self._download_geo_file(GEOSITE_DOWNLOAD_URL, GEOSITE_PATH)
         return GEOSITE_PATH
 
+    def update_amneziawg(self) -> Path:
+        self.warnings = []
+        self._prepare_runtime_dirs()
+        self._download_binary_file(AMNEZIAWG_EXECUTABLE_DOWNLOAD_URL, AMNEZIAWG_EXECUTABLE)
+        self._download_binary_file(AMNEZIAWG_EXECUTABLE_FALLBACK_DOWNLOAD_URL, AMNEZIAWG_EXECUTABLE_FALLBACK)
+        self._download_wintun_for_amneziawg()
+        if not self._has_complete_amneziawg_runtime():
+            raise RuntimeError("После обновления runtime AmneziaWG собран не полностью.")
+        return AMNEZIAWG_EXECUTABLE
+
     def update_all_components(self) -> dict[str, Path]:
         self.warnings = []
         return {
             "xray.exe": self.update_xray(),
+            "amneziawg": self.update_amneziawg(),
             "geoip.dat": self.update_geoip(),
             "geosite.dat": self.update_geosite(),
         }
@@ -107,6 +136,7 @@ class XrayInstaller:
     @staticmethod
     def _prepare_runtime_dirs() -> None:
         XRAY_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+        AMNEZIAWG_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
         DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     def _copy_bundled_runtime(self) -> bool:
@@ -121,6 +151,16 @@ class XrayInstaller:
                 shutil.copy2(source, destination)
             copied = copied or destination.exists()
         return copied and XRAY_EXECUTABLE.exists()
+
+    def _copy_bundled_amneziawg_runtime(self) -> bool:
+        copied = False
+        for filename in AMNEZIAWG_BUNDLED_FILES:
+            source = APP_DIR / filename
+            destination = AMNEZIAWG_RUNTIME_DIR / filename
+            if source.exists() and not destination.exists():
+                shutil.copy2(source, destination)
+            copied = copied or destination.exists()
+        return copied and self._has_complete_amneziawg_runtime()
 
     def _resolve_release_asset_url(self) -> str:
         try:
@@ -156,6 +196,28 @@ class XrayInstaller:
         except requests.RequestException as exc:
             raise RuntimeError(f"Не удалось скачать Xray-core: {exc}") from exc
 
+    def _download_binary_file(self, url: str, target: Path) -> Path:
+        temp_target = target.with_suffix(f"{target.suffix}.tmp")
+        try:
+            with self.session.get(url, stream=True, timeout=120) as response:
+                response.raise_for_status()
+                with temp_target.open("wb") as file_obj:
+                    for chunk in response.iter_content(chunk_size=1024 * 512):
+                        if chunk:
+                            file_obj.write(chunk)
+            temp_target.replace(target)
+            return target
+        except requests.RequestException as exc:
+            temp_target.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"Не удалось скачать {target.name} с {url}. Проверьте подключение или обновите файл вручную."
+            ) from exc
+        except OSError as exc:
+            temp_target.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"Не удалось сохранить {target.name} в {target}. Проверьте права доступа."
+            ) from exc
+
     def _extract_release(self, archive_path: Path) -> None:
         try:
             with zipfile.ZipFile(archive_path) as archive:
@@ -179,6 +241,30 @@ class XrayInstaller:
                     raise RuntimeError("В архиве Xray-core отсутствует xray.exe.")
         except zipfile.BadZipFile as exc:
             raise RuntimeError("Архив Xray-core поврежден или имеет неверный формат.") from exc
+
+    def _download_wintun_for_amneziawg(self) -> Path:
+        self._download_binary_file(WINTUN_DOWNLOAD_URL, WINTUN_ARCHIVE_PATH)
+        self._extract_wintun_release(WINTUN_ARCHIVE_PATH, AMNEZIAWG_WINTUN_DLL)
+        WINTUN_ARCHIVE_PATH.unlink(missing_ok=True)
+        return AMNEZIAWG_WINTUN_DLL
+
+    def _extract_wintun_release(self, archive_path: Path, target: Path) -> None:
+        try:
+            with zipfile.ZipFile(archive_path) as archive:
+                for member in archive.infolist():
+                    member_name = Path(member.filename).name.lower()
+                    normalized_path = member.filename.replace("\\", "/").lower()
+                    if member_name != "wintun.dll":
+                        continue
+                    if "/amd64/" not in f"/{normalized_path}":
+                        continue
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with archive.open(member) as src, target.open("wb") as dst:
+                        dst.write(src.read())
+                    return
+                raise RuntimeError("В архиве Wintun отсутствует wintun.dll для Windows amd64.")
+        except zipfile.BadZipFile as exc:
+            raise RuntimeError("Архив Wintun поврежден или имеет неверный формат.") from exc
 
     @staticmethod
     def get_xray_version(executable_path: Path | None = None) -> tuple[int, int, int] | None:
@@ -234,6 +320,14 @@ class XrayInstaller:
                 f"Не удалось сохранить {target.name} в {target}. Проверьте права доступа."
             ) from exc
 
+    @staticmethod
+    def _has_complete_amneziawg_runtime() -> bool:
+        return (
+            AMNEZIAWG_EXECUTABLE.exists()
+            and AMNEZIAWG_EXECUTABLE_FALLBACK.exists()
+            and AMNEZIAWG_WINTUN_DLL.exists()
+        )
+
 
 class SingboxInstaller:
     def __init__(self) -> None:
@@ -265,6 +359,7 @@ class SingboxInstaller:
     @staticmethod
     def _prepare_runtime_dirs() -> None:
         XRAY_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+        AMNEZIAWG_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
         DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     def _resolve_release_asset_url(self) -> str:

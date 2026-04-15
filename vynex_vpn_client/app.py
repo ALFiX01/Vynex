@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 import re
+import string
 import sys
 import threading
 from typing import Callable
@@ -11,6 +12,18 @@ from urllib.parse import urlparse
 
 import questionary
 from questionary import Choice, Separator, Style
+from questionary.prompts.select import (
+    Application,
+    DEFAULT_QUESTION_PREFIX,
+    DEFAULT_SELECTED_POINTER,
+    InquirerControl,
+    KeyBindings,
+    Keys,
+    Question,
+    common,
+    merge_styles_default,
+    utils,
+)
 from rich.console import Console, Group
 from rich.markup import escape
 from rich.panel import Panel
@@ -25,8 +38,21 @@ if __package__ in {None, ""}:
 
     from vynex_vpn_client.app_update import AppReleaseInfo, AppUpdateChecker
     from vynex_vpn_client.app_updater import AppSelfUpdater
+    from vynex_vpn_client.amneziawg_network import AmneziaWgWindowsNetworkIntegration
+    from vynex_vpn_client.amneziawg_process_manager import AmneziaWgProcessManager
+    from vynex_vpn_client.backends import (
+        AmneziaWgBackend,
+        BackendConnectionProfile,
+        BackendRuntimeRequest,
+        BaseVpnBackend,
+        XrayBackend,
+        select_backend,
+    )
     from vynex_vpn_client.config_builder import XrayConfigBuilder
     from vynex_vpn_client.constants import (
+        AMNEZIAWG_EXECUTABLE,
+        AMNEZIAWG_EXECUTABLE_FALLBACK,
+        AMNEZIAWG_WINTUN_DLL,
         APP_NAME,
         APP_VERSION,
         GEOIP_PATH,
@@ -69,8 +95,21 @@ if __package__ in {None, ""}:
 else:
     from .app_update import AppReleaseInfo, AppUpdateChecker
     from .app_updater import AppSelfUpdater
+    from .amneziawg_network import AmneziaWgWindowsNetworkIntegration
+    from .amneziawg_process_manager import AmneziaWgProcessManager
+    from .backends import (
+        AmneziaWgBackend,
+        BackendConnectionProfile,
+        BackendRuntimeRequest,
+        BaseVpnBackend,
+        XrayBackend,
+        select_backend,
+    )
     from .config_builder import XrayConfigBuilder
     from .constants import (
+        AMNEZIAWG_EXECUTABLE,
+        AMNEZIAWG_EXECUTABLE_FALLBACK,
+        AMNEZIAWG_WINTUN_DLL,
         APP_NAME,
         APP_VERSION,
         GEOIP_PATH,
@@ -131,6 +170,21 @@ class VynexVpnApp:
         self.routing_profiles = RoutingProfileManager()
         self.config_builder = XrayConfigBuilder()
         self.process_manager = XrayProcessManager(on_crash_callback=self._handle_xray_crash)
+        self.amneziawg_process_manager = AmneziaWgProcessManager(
+            on_crash_callback=lambda: self._handle_backend_crash("amneziawg")
+        )
+        self.amneziawg_network_integration = AmneziaWgWindowsNetworkIntegration()
+        self.backends: dict[str, BaseVpnBackend] = {
+            "xray": XrayBackend(
+                installer=self.installer,
+                config_builder=self.config_builder,
+                process_manager=self.process_manager,
+            ),
+            "amneziawg": AmneziaWgBackend(
+                installer=self.installer,
+                process_manager=self.amneziawg_process_manager,
+            ),
+        }
         self.health_checker = XrayHealthChecker()
         self.system_proxy_manager = WindowsSystemProxyManager()
         self.app_release_info: AppReleaseInfo | None = self.app_update_checker.get_cached_release(max_age_seconds=None)
@@ -339,7 +393,7 @@ class VynexVpnApp:
             self._render_screen()
             self.console.print(self._empty_servers_panel(title=title))
             result = self._quick_import_prompt_flow(
-                "Вставьте ссылку сервера, URL подписки или нажмите Enter для перехода в главное меню:"
+                "Вставьте ссылку сервера, AWG-конфиг / путь к .conf, URL подписки или нажмите Enter для перехода в главное меню:"
             )
             if result == "cancelled":
                 return
@@ -350,8 +404,8 @@ class VynexVpnApp:
         table.add_column("Значение", overflow="fold", max_width=max(36, self.console.width - 32))
         table.add_row("Серверов", "0")
         table.add_row("Подписок", str(len(self.storage.load_subscriptions())))
-        table.add_row("Что делать", "Вставить одну ссылку сервера или URL подписки")
-        table.add_row("Автоопределение", "Алгоритм сам определит подписка это или просто сервер")
+        table.add_row("Что делать", "Вставить ссылку сервера, URL подписки или AWG-конфиг")
+        table.add_row("Автоопределение", "Алгоритм сам определит сервер, AWG-конфиг, bundle или подписку")
         table.add_row("Подсказка", "Пустой ввод пропустит импорт и откроет главное меню")
         return Panel.fit(table, title=title, border_style="cyan")
 
@@ -394,8 +448,15 @@ class VynexVpnApp:
             self._pause()
             return
         routing_label = routing_profile.name
+        connection_profile = BackendConnectionProfile(
+            server=selected_server,
+            mode=mode,
+            routing_profile=routing_profile,
+        )
+        backend = self._backend_for_connection(connection_profile)
+        routing_display_label = self._routing_display_name(backend.backend_id, routing_label)
         proxy_session: ProxyRuntimeSession | None = None
-        manager = self._process_manager_for_mode(mode)
+        manager = self._process_manager_for_backend(backend.backend_id)
         pid: int | None = None
         helper_pid: int | None = None
         use_system_proxy = False
@@ -403,41 +464,52 @@ class VynexVpnApp:
         previous_system_proxy: SystemProxyState | None = None
         outbound_interface: WindowsInterfaceDetails | None = None
         tun_interface: WindowsInterfaceDetails | None = None
+        tun_interface_name_hint: str | None = None
+        awg_expected_network = None
+        awg_network_session = None
         try:
             self._show_connection_progress(
                 self._ui_server_name(selected_server.name),
                 routing_label,
                 "Подготовка параметров подключения...",
             )
-            self._ensure_runtime_ready(mode)
+            backend.ensure_runtime_ready(connection_profile)
             if mode == "TUN":
                 self._show_connection_progress(
                     self._ui_server_name(selected_server.name),
                     routing_label,
                     "Проверка требований TUN...",
                 )
-                outbound_interface = self._prepare_tun_prerequisites()
+                outbound_interface = self._prepare_tun_prerequisites(backend=backend)
             self._disconnect_runtime(silent=True)
             manager.ensure_no_running_instances()
             use_system_proxy = mode == "PROXY" and settings.set_system_proxy
             if use_system_proxy:
                 previous_system_proxy = self.system_proxy_manager.snapshot()
             if mode == "TUN":
-                config = self.config_builder.build(
-                    server=selected_server,
-                    mode=mode,
-                    routing_profile=routing_profile,
-                    outbound_interface_name=outbound_interface.alias if outbound_interface else None,
+                config = backend.build_runtime_config(
+                    BackendRuntimeRequest(
+                        profile=connection_profile,
+                        outbound_interface_name=outbound_interface.alias if outbound_interface else None,
+                    )
                 )
+                tun_interface_name_hint = str(config.get("tunnel_name") or "").strip() or None
+                if backend.backend_id == "amneziawg":
+                    awg_profile = selected_server.amneziawg_profile
+                    if awg_profile is None or tun_interface_name_hint is None:
+                        raise RuntimeError("Для AmneziaWG не удалось определить параметры туннельной сессии.")
+                    self.amneziawg_network_integration.ensure_prerequisites(tunnel_name=tun_interface_name_hint)
+                    awg_expected_network = self.amneziawg_network_integration.build_expected_state(
+                        profile=awg_profile,
+                        tunnel_name=tun_interface_name_hint,
+                    )
             else:
                 proxy_session = self._build_runtime_proxy_session()
-                config = self.config_builder.build(
-                    server=selected_server,
-                    mode=mode,
-                    routing_profile=routing_profile,
-                    socks_port=proxy_session.socks_port,
-                    http_port=proxy_session.http_port,
-                    socks_credentials=proxy_session.socks_credentials,
+                config = backend.build_runtime_config(
+                    BackendRuntimeRequest(
+                        profile=connection_profile,
+                        proxy_session=proxy_session,
+                    )
                 )
             self._show_connection_progress(
                 self._ui_server_name(selected_server.name),
@@ -451,15 +523,40 @@ class VynexVpnApp:
                 "Ожидание готовности ядра подключения...",
             )
             if mode == "TUN":
-                tun_interface = self._wait_for_tun_ready(pid=pid)
-                self._show_connection_progress(
-                    self._ui_server_name(selected_server.name),
-                    routing_label,
-                    "Настройка маршрутов Windows...",
+                tun_interface = self._wait_for_tun_ready(
+                    pid=pid,
+                    backend=backend,
+                    tun_interface_name=tun_interface_name_hint,
                 )
-                self._apply_tun_routes(tun_interface)
+                if backend.backend_id == "amneziawg":
+                    awg_profile = selected_server.amneziawg_profile
+                    if awg_profile is None or tun_interface_name_hint is None:
+                        raise RuntimeError("Для AmneziaWG не удалось определить профиль туннельной сессии.")
+                    awg_network_session = self.amneziawg_network_integration.capture_session(
+                        profile=awg_profile,
+                        tunnel_name=tun_interface_name_hint,
+                    )
+                    tun_interface = WindowsInterfaceDetails(
+                        alias=awg_network_session.interface_name,
+                        index=awg_network_session.interface_index,
+                        ipv4=awg_network_session.primary_ipv4,
+                        status=tun_interface.status if tun_interface is not None else "Up",
+                        has_route=bool(awg_network_session.route_prefixes),
+                    )
+                elif self._tun_route_prefixes(backend.backend_id):
+                    self._show_connection_progress(
+                        self._ui_server_name(selected_server.name),
+                        routing_label,
+                        "Настройка маршрутов Windows...",
+                    )
+                    self._apply_tun_routes(tun_interface, backend=backend)
             elif proxy_session is not None:
-                self._wait_for_local_proxy_ready(pid=pid, proxy_session=proxy_session, mode=mode)
+                self._wait_for_local_proxy_ready(
+                    pid=pid,
+                    proxy_session=proxy_session,
+                    mode=mode,
+                    backend_id=backend.backend_id,
+                )
             self._show_connection_progress(
                 self._ui_server_name(selected_server.name),
                 routing_label,
@@ -487,20 +584,30 @@ class VynexVpnApp:
                 )
                 self.system_proxy_manager.enable_proxy(http_port=proxy_session.http_port)
                 system_proxy_applied = True
+            tun_route_prefixes = (
+                list(awg_network_session.route_prefixes)
+                if awg_network_session is not None
+                else list(self._tun_route_prefixes(backend.backend_id))
+                if mode == "TUN"
+                else []
+            )
             state = RuntimeState(
                 pid=pid,
                 helper_pid=helper_pid,
+                backend_id=backend.backend_id,
                 mode=mode,
                 server_id=selected_server.id,
                 started_at=utc_now_iso(),
                 system_proxy_enabled=use_system_proxy,
                 previous_system_proxy=previous_system_proxy.to_dict() if previous_system_proxy else None,
                 routing_profile_id=routing_profile.profile_id,
-                routing_profile_name=routing_label,
+                routing_profile_name=routing_display_label,
                 tun_interface_name=tun_interface.alias if tun_interface else None,
                 tun_interface_index=tun_interface.index if tun_interface else None,
                 tun_interface_ipv4=tun_interface.ipv4 if tun_interface else None,
-                tun_route_prefixes=list(self.config_builder.TUN_ROUTE_PREFIXES) if mode == "TUN" else [],
+                tun_interface_addresses=list(awg_network_session.interface_addresses) if awg_network_session else [],
+                tun_dns_servers=list(awg_network_session.dns_servers) if awg_network_session else [],
+                tun_route_prefixes=tun_route_prefixes,
                 outbound_interface_name=outbound_interface.alias if outbound_interface else None,
             )
             self.storage.save_runtime_state(state)
@@ -508,21 +615,23 @@ class VynexVpnApp:
             detail_rows = [
                 ("Сервер", self._ui_server_name(selected_server.name)),
                 ("Протокол", selected_server.protocol.upper()),
-                ("Режим", self._connection_mode_label(mode)),
-                ("Маршрутизация", routing_label),
+                ("Режим", self._connection_mode_label(mode, backend_name=backend.engine_name)),
+                ("Маршрутизация", routing_display_label),
                 ("PID", str(pid)),
                 ("Системный proxy", "включен" if use_system_proxy else "не используется"),
             ]
             if mode == "TUN":
-                detail_rows.append(("Ядро", "xray"))
+                detail_rows.append(("Ядро", backend.engine_name))
                 if tun_interface is not None:
                     detail_rows.append(("TUN интерфейс", f"{tun_interface.alias} ({tun_interface.ipv4 or 'IPv4 не определен'})"))
                 if outbound_interface is not None:
                     detail_rows.append(("Внешний интерфейс", outbound_interface.alias))
-                detail_rows.append(("Маршруты", ", ".join(self.config_builder.TUN_ROUTE_PREFIXES)))
+                route_prefixes = tuple(tun_route_prefixes)
+                if route_prefixes:
+                    detail_rows.append(("Маршруты", ", ".join(route_prefixes)))
                 detail_rows.append(("IPv6", "может обходить TUN, если на системе активен IPv6"))
             else:
-                detail_rows.append(("Ядро", "xray"))
+                detail_rows.append(("Ядро", backend.engine_name))
                 detail_rows.append(("Локальный SOCKS5", "включен, учетные данные только в памяти"))
                 detail_rows.append(("Локальный HTTP", "включен на случайном порту текущей сессии"))
             if health_result.checked_url:
@@ -542,14 +651,38 @@ class VynexVpnApp:
             self._pause()
         except Exception as exc:  # noqa: BLE001
             if mode == "TUN":
-                self._cleanup_tun_routes(
-                    RuntimeState(
-                        mode="TUN",
-                        tun_interface_index=tun_interface.index if tun_interface else None,
-                        tun_interface_ipv4=tun_interface.ipv4 if tun_interface else None,
-                        tun_route_prefixes=list(self.config_builder.TUN_ROUTE_PREFIXES),
-                    )
+                cleanup_state = RuntimeState(
+                    backend_id=backend.backend_id,
+                    mode="TUN",
+                    tun_interface_name=tun_interface.alias if tun_interface else tun_interface_name_hint,
+                    tun_interface_index=tun_interface.index if tun_interface else None,
+                    tun_interface_ipv4=tun_interface.ipv4 if tun_interface else None,
+                    tun_interface_addresses=list(
+                        awg_network_session.interface_addresses
+                        if awg_network_session is not None
+                        else awg_expected_network.interface_addresses
+                        if awg_expected_network is not None
+                        else []
+                    ),
+                    tun_dns_servers=list(
+                        awg_network_session.dns_servers
+                        if awg_network_session is not None
+                        else awg_expected_network.dns_servers
+                        if awg_expected_network is not None
+                        else []
+                    ),
+                    tun_route_prefixes=list(
+                        awg_network_session.route_prefixes
+                        if awg_network_session is not None
+                        else awg_expected_network.route_prefixes
+                        if awg_expected_network is not None
+                        else self._tun_route_prefixes(backend.backend_id)
+                    ),
                 )
+                if pid and backend.backend_id == "amneziawg":
+                    manager.stop(pid)
+                    pid = None
+                self._cleanup_tun_state(cleanup_state)
             if pid:
                 manager.stop(pid)
             if helper_pid:
@@ -572,7 +705,9 @@ class VynexVpnApp:
         self._disconnect_runtime()
 
     def add_server_flow(self) -> None:
-        self._quick_import_prompt_flow("Вставьте ссылку сервера, URL подписки или список ссылок")
+        self._quick_import_prompt_flow(
+            "Вставьте ссылку сервера, AWG-конфиг / путь к .conf, URL подписки или список ссылок"
+        )
 
     def _server_details_flow(self, server_id: str) -> None:
         while True:
@@ -588,11 +723,9 @@ class VynexVpnApp:
             self.console.print(self._server_details_panel(server, parent_subscription=parent_subscription))
             choices = ["Удалить сервер"]
             if server.source == "manual":
-                choices = [
-                    "Переименовать",
-                    "Изменить ссылку",
-                    "Удалить сервер",
-                ]
+                choices = ["Переименовать", "Удалить сервер"]
+                if not server.is_amneziawg:
+                    choices.insert(1, "Изменить ссылку")
             elif server.source == "subscription":
                 choices = ["Отвязать от подписки", "Удалить сервер"]
                 if parent_subscription is not None:
@@ -679,6 +812,8 @@ class VynexVpnApp:
     def _edit_server_link_flow(self, server: ServerEntry) -> None:
         if server.source != "manual":
             raise ValueError("Ссылку можно менять только у ручных серверов.")
+        if server.is_amneziawg:
+            raise ValueError("AWG-профиль импортируется из .conf и не редактируется как share-link.")
         raw_link = questionary.text("Новая ссылка сервера", default=server.raw_link).ask()
         if raw_link is None:
             raise ValueError("Изменение ссылки отменено.")
@@ -803,7 +938,9 @@ class VynexVpnApp:
         return True
 
     def add_subscription_flow(self) -> None:
-        self._quick_import_prompt_flow("Вставьте URL подписки, ссылку сервера или список ссылок")
+        self._quick_import_prompt_flow(
+            "Вставьте URL подписки, ссылку сервера, AWG-конфиг / путь к .conf или список ссылок"
+        )
 
     def _quick_import_prompt_flow(self, prompt: str) -> str:
         raw_value = questionary.text(prompt).ask()
@@ -826,7 +963,7 @@ class VynexVpnApp:
             return
         if import_kind == "server_bundle":
             imported = self._import_server_links(payload)
-            self._show_server_batch_saved("Серверы импортированы", imported, source_label="вставленные ссылки")
+            self._show_server_batch_saved("Импорт выполнен", imported, source_label="Ссылка")
             return
 
         normalized_url = payload
@@ -856,7 +993,7 @@ class VynexVpnApp:
         servers = parse_server_entries(normalized)
         if not servers:
             raise ValueError(
-                "Не удалось определить формат. Вставьте ссылку сервера, URL подписки, Base64, plain-text или JSON подписки."
+                "Не удалось определить формат. Вставьте ссылку сервера, vpn:// ключ, URL подписки, AWG-конфиг, путь к .conf, Base64, plain-text или JSON подписки."
             )
         return "server_bundle", servers
 
@@ -1125,6 +1262,7 @@ class VynexVpnApp:
                 "Компоненты",
                 choices=[
                     self._component_choice_label("Xray-core", XRAY_EXECUTABLE),
+                    self._amneziawg_component_label(),
                     self._component_choice_label("geoip.dat", GEOIP_PATH),
                     self._component_choice_label("geosite.dat", GEOSITE_PATH),
                     self._routing_profiles_component_label(),
@@ -1140,6 +1278,10 @@ class VynexVpnApp:
                     self._prepare_component_update()
                     path = self.installer.update_xray()
                     self._show_component_result("Xray-core обновлен", path.name)
+                elif selected_action.startswith("AmneziaWG"):
+                    self._prepare_component_update()
+                    self.installer.update_amneziawg()
+                    self._show_component_result("AmneziaWG обновлен", "amneziawg.exe, awg.exe, wintun.dll")
                 elif selected_action.startswith("geoip.dat"):
                     self._prepare_component_update()
                     path = self.installer.update_geoip()
@@ -1255,9 +1397,10 @@ class VynexVpnApp:
     def status_flow(self) -> None:
         state = self._current_state()
         settings = self._validated_settings(raise_on_error=False)
+        backend = self._backend_for_runtime_state(state)
         if not state.is_running:
             default_mode = settings.connection_mode
-            engine_name = "xray"
+            engine_name = self._backend_engine_name(backend.backend_id if backend is not None else None)
             engine_state_label = self._runtime_engine_state_label(RuntimeState(mode=default_mode))
             table = Table(show_header=False, box=None)
             table.add_row("Версия", f"v{APP_VERSION}")
@@ -1302,17 +1445,23 @@ class VynexVpnApp:
         table.add_row("Адрес", f"{server.host}:{server.port}" if server else "-")
         table.add_row("Протокол", server.protocol.upper() if server else "-")
         table.add_row("Старт", state.started_at or "-")
-        table.add_row("Routing", state.routing_profile_name or self._active_routing_profile_name())
+        table.add_row(
+            "Routing",
+            self._routing_display_name(
+                state.backend_id,
+                state.routing_profile_name or self._active_routing_profile_name(),
+            ),
+        )
         if state.mode == "PROXY":
-            table.add_row("Ядро", "xray")
-            table.add_row("Состояние xray", self._runtime_engine_state_label(state))
+            table.add_row("Ядро", self._backend_engine_name(state.backend_id))
+            table.add_row(f"Состояние {self._backend_engine_name(state.backend_id)}", self._runtime_engine_state_label(state))
             table.add_row("Локальные порты", "скрыты")
             table.add_row("SOCKS5", "защищен аутентификацией и не публикуется")
             table.add_row("Системный proxy", "Да" if state.system_proxy_enabled else "Нет")
         elif state.mode == "TUN":
-            table.add_row("Ядро", "xray")
-            table.add_row("Состояние xray", self._runtime_engine_state_label(state))
-            table.add_row("TUN", state.tun_interface_name or self.config_builder.TUN_INTERFACE_NAME)
+            table.add_row("Ядро", self._backend_engine_name(state.backend_id))
+            table.add_row(f"Состояние {self._backend_engine_name(state.backend_id)}", self._runtime_engine_state_label(state))
+            table.add_row("TUN", state.tun_interface_name or self._tun_interface_name(state.backend_id))
             table.add_row("IPv4 TUN", state.tun_interface_ipv4 or "-")
             table.add_row("Маршруты", ", ".join(state.tun_route_prefixes) if state.tun_route_prefixes else "-")
             table.add_row("Внешний интерфейс", state.outbound_interface_name or "-")
@@ -1333,12 +1482,14 @@ class VynexVpnApp:
     def _current_state(self) -> RuntimeState:
         state = self.storage.load_runtime_state()
         state = self._sync_runtime_state_with_manager(state)
-        manager = self._process_manager_for_mode(state.mode)
+        manager = self._process_manager_for_runtime_state(state)
         main_dead = bool(
             state.pid
-            and not self._xray_runtime_recovery_active(state)
+            and not self._backend_runtime_recovery_active(state)
             and not manager.is_running(state.pid)
         )
+        # TODO: helper_pid is still tied to the legacy xray process manager.
+        # Model backend-specific helper ownership once a non-xray backend starts using it.
         helper_dead = bool(state.helper_pid and not self.process_manager.is_running(state.helper_pid))
         if main_dead or helper_dead:
             self._proxy_session = None
@@ -1397,10 +1548,14 @@ class VynexVpnApp:
 
     def _disconnect_runtime(self, *, silent: bool = False) -> None:
         state = self.storage.load_runtime_state()
+        backend_id = self._runtime_backend_id(state)
+        if state.pid and str(state.mode or "").upper() == "TUN" and backend_id == "amneziawg":
+            self._process_manager_for_runtime_state(state).stop(state.pid)
+            state.pid = None
         if str(state.mode or "").upper() == "TUN":
-            self._cleanup_tun_routes(state)
+            self._cleanup_tun_state(state)
         if state.pid:
-            self._process_manager_for_mode(state.mode).stop(state.pid)
+            self._process_manager_for_runtime_state(state).stop(state.pid)
         if state.helper_pid:
             self.process_manager.stop(state.helper_pid)
         self._proxy_session = None
@@ -1451,7 +1606,7 @@ class VynexVpnApp:
     def _sync_runtime_state_with_manager(self, state: RuntimeState) -> RuntimeState:
         if not state.is_running:
             return state
-        manager = self._process_manager_for_mode(state.mode)
+        manager = self._process_manager_for_runtime_state(state)
         current_pid = getattr(manager, "pid", None)
         if current_pid is None or current_pid == state.pid:
             return state
@@ -1462,24 +1617,30 @@ class VynexVpnApp:
         return state
 
     def _handle_xray_crash(self) -> None:
+        self._handle_backend_crash("xray")
+
+    def _handle_backend_crash(self, backend_id: str) -> None:
         state = self.storage.load_runtime_state()
+        if self._runtime_backend_id(state) != backend_id:
+            return
         mode = str(state.mode or "").upper()
         if mode not in {"PROXY", "TUN"}:
             return
         self._proxy_session = None
         if mode == "TUN":
-            self._cleanup_tun_routes(state)
+            self._cleanup_tun_state(state)
         else:
             self._restore_system_proxy(state)
         self.storage.save_runtime_state(RuntimeState())
+        engine_title = self._backend_engine_title(backend_id)
         if mode == "TUN":
             self._runtime_notice = (
-                "Xray завершился и не смог восстановиться автоматически. "
-                "TUN маршруты удалены, подключение сброшено."
+                f"{engine_title} завершился и не смог восстановиться автоматически. "
+                "Сетевое состояние туннеля очищено, подключение сброшено."
             )
             return
         self._runtime_notice = (
-            "Xray завершился и не смог восстановиться автоматически. "
+            f"{engine_title} завершился и не смог восстановиться автоматически. "
             "Подключение сброшено, системный proxy возвращен в прежнее состояние."
         )
 
@@ -1498,10 +1659,20 @@ class VynexVpnApp:
         profile = self._get_active_routing_profile()
         return profile.name if profile else "-"
 
+    @staticmethod
+    def _routing_display_name(backend_id: str | None, routing_name: str | None) -> str:
+        if backend_id == "amneziawg":
+            return "из AWG-конфига"
+        normalized = str(routing_name or "").strip()
+        return normalized or "-"
+
     def _banner_status_line(self) -> str:
         state = self._current_state()
         settings = self._validated_settings(raise_on_error=False)
-        routing_source = state.routing_profile_name if state.is_running and state.routing_profile_name else self._active_routing_profile_name()
+        routing_source = self._routing_display_name(
+            state.backend_id if state.is_running else None,
+            state.routing_profile_name if state.is_running and state.routing_profile_name else self._active_routing_profile_name(),
+        )
         routing_name = escape(self._shorten_text(routing_source, 28))
         update_suffix = ""
         if self._available_app_update() is not None:
@@ -1533,64 +1704,89 @@ class VynexVpnApp:
     def _runtime_status_markup(self, state: RuntimeState) -> str:
         if not state.is_running:
             return "[yellow]Не подключено[/yellow]"
-        xray_state = self._proxy_engine_state(state)
-        if xray_state == XrayState.STARTING:
-            return "[cyan]Xray запускается[/cyan]"
-        if xray_state == XrayState.CRASHED:
-            return "[yellow]Xray восстанавливается[/yellow]"
-        if xray_state == XrayState.STOPPING:
+        backend_title = self._backend_engine_title(self._runtime_backend_id(state))
+        backend_state = self._backend_process_state(state)
+        if backend_state == XrayState.STARTING:
+            return f"[cyan]{backend_title} запускается[/cyan]"
+        if backend_state == XrayState.CRASHED:
+            if not self._backend_supports_crash_recovery(state):
+                return f"[red]{backend_title} завершился с ошибкой[/red]"
+            return f"[yellow]{backend_title} восстанавливается[/yellow]"
+        if backend_state == XrayState.STOPPING:
             return "[yellow]Подключение останавливается[/yellow]"
         return "[green]Подключено[/green]"
 
     def _runtime_status_text(self, state: RuntimeState) -> str:
         if not state.is_running:
             return "Не подключено"
-        xray_state = self._proxy_engine_state(state)
-        if xray_state == XrayState.STARTING:
-            return "Запуск Xray"
-        if xray_state == XrayState.CRASHED:
-            return "Восстановление Xray"
-        if xray_state == XrayState.STOPPING:
+        backend_title = self._backend_engine_title(self._runtime_backend_id(state))
+        backend_state = self._backend_process_state(state)
+        if backend_state == XrayState.STARTING:
+            return f"Запуск {backend_title}"
+        if backend_state == XrayState.CRASHED:
+            if not self._backend_supports_crash_recovery(state):
+                return f"Сбой {backend_title}"
+            return f"Восстановление {backend_title}"
+        if backend_state == XrayState.STOPPING:
             return "Остановка подключения"
         return "Запущен"
 
     def _runtime_engine_state_label(self, state: RuntimeState) -> str:
-        xray_state = self._proxy_engine_state(state)
-        if xray_state == XrayState.STARTING:
+        backend_state = self._backend_process_state(state)
+        if backend_state == XrayState.STARTING:
             return "Запускается"
-        if xray_state == XrayState.RUNNING:
+        if backend_state == XrayState.RUNNING:
             return "Работает"
-        if xray_state == XrayState.STOPPING:
+        if backend_state == XrayState.STOPPING:
             return "Останавливается"
-        if xray_state == XrayState.CRASHED:
+        if backend_state == XrayState.CRASHED:
+            if not self._backend_supports_crash_recovery(state):
+                return "Сбой"
             return "Сбой, идет восстановление"
         return "Работает" if state.is_running else "Остановлено"
 
     def _runtime_pid_label(self, state: RuntimeState) -> str:
         if str(state.mode or "").upper() in {"PROXY", "TUN"}:
-            current_pid = self.process_manager.pid
+            current_pid = self._process_manager_for_runtime_state(state).pid
             if current_pid is not None:
                 return str(current_pid)
-            if self._proxy_engine_state(state) in {XrayState.STARTING, XrayState.CRASHED}:
+            backend_state = self._backend_process_state(state)
+            if backend_state == XrayState.STARTING:
+                return "запуск"
+            if backend_state == XrayState.CRASHED and self._backend_supports_crash_recovery(state):
                 return "перезапуск"
         return str(state.pid) if state.pid is not None else "-"
 
-    def _xray_runtime_recovery_active(self, state: RuntimeState) -> bool:
+    def _backend_runtime_recovery_active(self, state: RuntimeState) -> bool:
         if str(state.mode or "").upper() not in {"PROXY", "TUN"} or not state.is_running:
             return False
-        return self._proxy_engine_state(state) in {XrayState.STARTING, XrayState.CRASHED, XrayState.STOPPING}
+        backend_state = self._backend_process_state(state)
+        if backend_state in {XrayState.STARTING, XrayState.STOPPING}:
+            return True
+        return backend_state == XrayState.CRASHED and self._backend_supports_crash_recovery(state)
 
-    def _proxy_engine_state(self, state: RuntimeState | None = None) -> XrayState:
-        manager_state = self.process_manager.state
+    def _xray_runtime_recovery_active(self, state: RuntimeState) -> bool:
+        return self._backend_runtime_recovery_active(state)
+
+    def _backend_supports_crash_recovery(self, state: RuntimeState | None) -> bool:
+        backend = self._backend_for_runtime_state(state)
+        return bool(backend is not None and backend.supports_crash_recovery)
+
+    def _backend_process_state(self, state: RuntimeState | None = None) -> XrayState:
+        manager = self._process_manager_for_runtime_state(state)
+        manager_state = manager.state
         if (
             state is not None
             and state.is_running
             and manager_state == XrayState.STOPPED
             and state.pid is not None
-            and self.process_manager.is_running(state.pid)
+            and manager.is_running(state.pid)
         ):
             return XrayState.RUNNING
         return manager_state
+
+    def _proxy_engine_state(self, state: RuntimeState | None = None) -> XrayState:
+        return self._backend_process_state(state)
 
     def _show_error(self, title: str, error: Exception | str) -> None:
         summary, actions, details = self._error_guidance(title, error)
@@ -1853,6 +2049,96 @@ class VynexVpnApp:
                     [
                         "Откройте 'Компоненты' и обновите Xray-core.",
                         "Если используете .exe сборку, убедитесь, что файлы клиента не удалены антивирусом.",
+                    ],
+                    details,
+                )
+            if "amneziawg executable не найден" in normalized or "awg.exe" in normalized:
+                return (
+                    "Исполняемый файл AmneziaWG отсутствует в runtime-каталоге.",
+                    [
+                        "Проверьте, что бинарник AmneziaWG установлен рядом с runtime клиента.",
+                        "Если используете кастомный путь, убедитесь, что он указывает на рабочий `.exe` файл.",
+                    ],
+                    details,
+                )
+            if "конфликтующий интерфейс amneziawg" in normalized:
+                return (
+                    "Windows уже содержит интерфейс AmneziaWG с тем же именем туннеля.",
+                    [
+                        "Остановите другой экземпляр AmneziaWG/WireGuard с этим туннелем.",
+                        "Если это след от прошлого падения, перезагрузите систему или вручную удалите конфликтующий туннель и повторите попытку.",
+                    ],
+                    details,
+                )
+            if "windows не применила ожидаемые ipv4-адреса" in normalized:
+                return (
+                    "AmneziaWG запустился, но Windows не назначила туннелю адреса из профиля.",
+                    [
+                        "Проверьте корректность `Address` в AWG-конфиге.",
+                        "Если в системе есть другой VPN-клиент, временно отключите его и повторите попытку.",
+                    ],
+                    details,
+                )
+            if "windows не применила маршруты allowedips" in normalized:
+                return (
+                    "AmneziaWG поднял интерфейс, но маршруты full-tunnel/split-tunnel из AllowedIPs не появились в Windows.",
+                    [
+                        "Проверьте, что приложение запущено от имени администратора.",
+                        "Убедитесь, что другой VPN или корпоративные политики Windows не блокируют изменение маршрутов.",
+                    ],
+                    details,
+                )
+            if "windows не применила dns" in normalized:
+                return (
+                    "AmneziaWG поднял интерфейс, но DNS серверы из профиля не были применены в Windows.",
+                    [
+                        "Проверьте поле `DNS` в AWG-конфиге.",
+                        "Если у вас включены сторонние DNS-клиенты или endpoint security, временно отключите их и повторите попытку.",
+                    ],
+                    details,
+                )
+            if "невалидный runtime config amneziawg" in normalized:
+                return (
+                    "Клиент сформировал неполный или поврежденный runtime config для AmneziaWG.",
+                    [
+                        "Переимпортируйте AWG-конфиг и повторите попытку.",
+                        "Если ошибка повторяется, проверьте, что исходный `.conf` не поврежден и содержит корректные секции Interface/Peer.",
+                    ],
+                    details,
+                )
+            if "доступ запрещен при запуске amneziawg" in normalized:
+                return (
+                    "Windows не разрешила запуск backend-процесса AmneziaWG.",
+                    [
+                        "Запустите клиент от имени администратора.",
+                        "Проверьте, не блокирует ли бинарник Windows Defender, SmartScreen или корпоративная политика.",
+                    ],
+                    details,
+                )
+            if "превышено время ожидания запуска amneziawg" in normalized:
+                return (
+                    "AmneziaWG стартовал, но не успел поднять интерфейс за отведенное время.",
+                    [
+                        "Проверьте, что приложение запущено от имени администратора.",
+                        "Если в системе уже есть конфликтующий WireGuard/AmneziaWG туннель, остановите его и повторите попытку.",
+                    ],
+                    details,
+                )
+            if "amneziawg" in normalized and "wintun" in normalized:
+                return (
+                    "AmneziaWG не смог создать или инициализировать Wintun интерфейс Windows.",
+                    [
+                        "Убедитесь, что используется штатный Windows бинарник AmneziaWG и он не заблокирован Defender/SmartScreen.",
+                        "Если в системе уже работает другой TUN/Wintun-клиент, остановите его и повторите попытку.",
+                    ],
+                    details,
+                )
+            if "amneziawg backend неожиданно завершился" in normalized:
+                return (
+                    "AmneziaWG завершился во время запуска или сразу после него.",
+                    [
+                        "Проверьте детали ниже: они содержат последние строки stdout/stderr backend'а.",
+                        "Убедитесь, что исходный AWG-конфиг корректен и совместим с используемым Windows backend.",
                     ],
                     details,
                 )
@@ -2215,6 +2501,8 @@ class VynexVpnApp:
         table.add_row("Имя", self._ui_server_name(server.name))
         table.add_row("Протокол", server.protocol.upper())
         table.add_row("Адрес", f"{server.host}:{server.port}")
+        if server.is_amneziawg:
+            table.add_row("Профиль", "AmneziaWG")
         table.add_row("Источник", self._server_source_label(server))
         table.add_row("Статус", self._server_status_label(server, active_server_id=self._current_state().server_id))
         table.add_row("Создан", self._shorten_text(server.created_at, 19))
@@ -2535,6 +2823,17 @@ class VynexVpnApp:
         status = "есть" if path.exists() else "отсутствует"
         return f"{label}: {status}"
 
+    @staticmethod
+    def _amneziawg_component_label() -> str:
+        status = (
+            "есть"
+            if AMNEZIAWG_EXECUTABLE.exists()
+            and AMNEZIAWG_EXECUTABLE_FALLBACK.exists()
+            and AMNEZIAWG_WINTUN_DLL.exists()
+            else "отсутствует"
+        )
+        return f"AmneziaWG: {status}"
+
     def _routing_profiles_component_label(self) -> str:
         profiles_count = len(self.routing_profiles.list_profiles())
         return f"Профили маршрутизации: {profiles_count} шт."
@@ -2565,14 +2864,16 @@ class VynexVpnApp:
             ),
         )
 
-    def _prepare_tun_prerequisites(self) -> WindowsInterfaceDetails:
+    def _prepare_tun_prerequisites(self, *, backend: BaseVpnBackend | None = None) -> WindowsInterfaceDetails | None:
         if not is_running_as_admin():
             raise RuntimeError(
                 "TUN режим требует запуска приложения от имени администратора. "
                 "Перезапустите Vynex с повышенными правами."
             )
+        if backend is not None and backend.backend_id == "amneziawg":
+            return None
         outbound_interface = get_active_ipv4_interface(
-            exclude_aliases={self.config_builder.TUN_INTERFACE_NAME}
+            exclude_aliases={self._tun_interface_name(backend.backend_id if backend is not None else None)}
         )
         if outbound_interface is None:
             raise RuntimeError(
@@ -2581,12 +2882,19 @@ class VynexVpnApp:
             )
         return outbound_interface
 
-    def _wait_for_local_proxy_ready(self, *, pid: int, proxy_session: ProxyRuntimeSession, mode: str) -> None:
+    def _wait_for_local_proxy_ready(
+        self,
+        *,
+        pid: int,
+        proxy_session: ProxyRuntimeSession,
+        mode: str,
+        backend_id: str | None = None,
+    ) -> None:
         http_ready = wait_for_port_listener(proxy_session.http_port, timeout=12.0)
         socks_ready = wait_for_port_listener(proxy_session.socks_port, timeout=12.0)
         if http_ready and socks_ready:
             return
-        manager = self._process_manager_for_mode(mode)
+        manager = self._process_manager_for_mode(mode, backend_id=backend_id)
         if not manager.is_running(pid):
             raise RuntimeError(
                 "Ядро завершилось до запуска локальных proxy-inbound.\n"
@@ -2594,15 +2902,23 @@ class VynexVpnApp:
             )
         raise RuntimeError("Ядро не открыло локальные proxy-inbound вовремя.")
 
-    def _wait_for_tun_ready(self, *, pid: int) -> WindowsInterfaceDetails:
-        if wait_for_tun_interface(self.config_builder.TUN_INTERFACE_NAME, timeout=12.0):
+    def _wait_for_tun_ready(
+        self,
+        *,
+        pid: int,
+        backend: BaseVpnBackend | None = None,
+        tun_interface_name: str | None = None,
+    ) -> WindowsInterfaceDetails:
+        backend_id = backend.backend_id if backend is not None else None
+        tun_interface_name = tun_interface_name or self._tun_interface_name(backend_id)
+        if wait_for_tun_interface(tun_interface_name, timeout=12.0):
             details = get_interface_details(
-                self.config_builder.TUN_INTERFACE_NAME,
+                tun_interface_name,
                 allow_link_local=True,
             )
             if details is not None and details.ipv4:
                 return details
-        manager = self._process_manager_for_mode("TUN")
+        manager = self._process_manager_for_mode("TUN", backend_id=backend_id)
         if not manager.is_running(pid):
             raise RuntimeError(
                 "Ядро завершилось до инициализации TUN интерфейса.\n"
@@ -2612,10 +2928,16 @@ class VynexVpnApp:
             "TUN интерфейс был создан, но Windows не назначила ему IPv4 адрес вовремя."
         )
 
-    def _apply_tun_routes(self, tun_interface: WindowsInterfaceDetails) -> None:
+    def _apply_tun_routes(
+        self,
+        tun_interface: WindowsInterfaceDetails,
+        *,
+        backend: BaseVpnBackend | None = None,
+    ) -> None:
         if tun_interface.ipv4 is None:
             raise RuntimeError("Для TUN интерфейса не определен IPv4 адрес, маршруты не могут быть установлены.")
-        for prefix in self.config_builder.TUN_ROUTE_PREFIXES:
+        backend_id = backend.backend_id if backend is not None else None
+        for prefix in self._tun_route_prefixes(backend_id):
             add_ipv4_route(
                 prefix,
                 interface_index=tun_interface.index,
@@ -2632,6 +2954,12 @@ class VynexVpnApp:
                 interface_index=state.tun_interface_index,
                 next_hop=state.tun_interface_ipv4,
             )
+
+    def _cleanup_tun_state(self, state: RuntimeState) -> None:
+        if self._runtime_backend_id(state) == "amneziawg":
+            self.amneziawg_network_integration.cleanup_runtime_state(state)
+            return
+        self._cleanup_tun_routes(state)
 
     @staticmethod
     def _coerce_bool(value: object) -> bool:
@@ -2657,17 +2985,105 @@ class VynexVpnApp:
         raise ValueError("Некорректный режим подключения.")
 
     @staticmethod
-    def _connection_mode_label(value: str) -> str:
-        return "TUN (xray)" if str(value).upper() == "TUN" else "PROXY (xray)"
+    def _connection_mode_label(value: str, *, backend_name: str = "xray") -> str:
+        return f"TUN ({backend_name})" if str(value).upper() == "TUN" else f"PROXY ({backend_name})"
 
-    def _process_manager_for_mode(self, mode: str | None):
-        return self.process_manager
+    def _backend_by_id(self, backend_id: str | None) -> BaseVpnBackend | None:
+        backends = getattr(self, "backends", None)
+        if isinstance(backends, dict) and backend_id in backends:
+            return backends[backend_id]
+        return None
 
-    def _ensure_runtime_ready(self, mode: str) -> None:
-        if mode == "TUN":
-            self.installer.ensure_xray_tun_runtime()
+    def _runtime_backend_id(self, state: RuntimeState | None) -> str:
+        if state is not None and state.backend_id:
+            return state.backend_id
+        return "xray"
+
+    def _backend_engine_name(self, backend_id: str | None) -> str:
+        backend = self._backend_by_id(backend_id)
+        if backend is not None:
+            return backend.engine_name
+        if backend_id == "amneziawg":
+            return "amneziawg"
+        return "xray"
+
+    def _backend_engine_title(self, backend_id: str | None) -> str:
+        backend = self._backend_by_id(backend_id)
+        if backend is not None:
+            return backend.engine_title
+        if backend_id == "amneziawg":
+            return "AmneziaWG"
+        return "Xray"
+
+    def _tun_interface_name(self, backend_id: str | None) -> str:
+        backend = self._backend_by_id(backend_id)
+        if backend is not None and backend.tun_interface_name:
+            return backend.tun_interface_name
+        return self.config_builder.TUN_INTERFACE_NAME
+
+    def _tun_route_prefixes(self, backend_id: str | None) -> tuple[str, ...]:
+        backend = self._backend_by_id(backend_id)
+        if backend is not None and backend.tun_route_prefixes:
+            return backend.tun_route_prefixes
+        return tuple(self.config_builder.TUN_ROUTE_PREFIXES)
+
+    def _backend_for_connection(self, profile: BackendConnectionProfile) -> BaseVpnBackend:
+        backends = getattr(self, "backends", None)
+        if isinstance(backends, dict) and backends:
+            # TODO: move backend selection to explicit profile metadata once AWG import is implemented.
+            return select_backend(backends, profile)
+        return XrayBackend(
+            installer=getattr(self, "installer", None),
+            config_builder=self.config_builder,
+            process_manager=self.process_manager,
+        )
+
+    def _backend_for_runtime_state(self, state: RuntimeState | None) -> BaseVpnBackend | None:
+        return self._backend_by_id(self._runtime_backend_id(state))
+
+    def _process_manager_for_backend(self, backend_id: str | None):
+        backend = self._backend_by_id(backend_id)
+        if backend is not None and backend.process_controller is not None:
+            return backend.process_controller
+        if backend_id in {None, "xray"}:
+            return self.process_manager
+        raise NotImplementedError(
+            f"Backend '{backend_id}' пока не предоставляет process-controller."
+        )
+
+    def _process_manager_for_runtime_state(self, state: RuntimeState | None):
+        return self._process_manager_for_backend(self._runtime_backend_id(state))
+
+    def _process_manager_for_mode(self, mode: str | None, *, backend_id: str | None = None):
+        return self._process_manager_for_backend(backend_id)
+
+    def _ensure_runtime_ready(
+        self,
+        mode: str,
+        *,
+        server: ServerEntry | None = None,
+        routing_profile=None,
+    ) -> None:
+        if server is None or routing_profile is None:
+            if mode == "TUN":
+                self.installer.ensure_xray_tun_runtime()
+                return
+            self.installer.ensure_xray()
             return
-        self.installer.ensure_xray()
+        backend = self._backend_for_connection(
+            BackendConnectionProfile(
+                server=server,
+                mode=mode,
+                routing_profile=routing_profile,
+            )
+        )
+        backend.ensure_runtime_ready(
+            BackendConnectionProfile(
+                server=server,
+                mode=mode,
+                routing_profile=routing_profile,
+            )
+        )
 
     @staticmethod
     def _pause() -> None:
@@ -2731,13 +3147,179 @@ class VynexVpnApp:
         return Style(style_rules)
 
     @staticmethod
+    def _back_choice_value(choices: object) -> object | None:
+        for choice in choices:
+            if VynexVpnApp._choice_title(choice) != "Назад":
+                continue
+            if isinstance(choice, Choice):
+                return choice.value
+            if isinstance(choice, str):
+                return choice
+        return None
+
+    @staticmethod
+    def _select_with_escape_back(
+        message: str,
+        choices,
+        default=None,
+        qmark: str = DEFAULT_QUESTION_PREFIX,
+        pointer: str | None = DEFAULT_SELECTED_POINTER,
+        style: Style | None = None,
+        use_shortcuts: bool = False,
+        use_arrow_keys: bool = True,
+        use_indicator: bool = False,
+        use_jk_keys: bool = True,
+        use_emacs_keys: bool = True,
+        use_search_filter: bool = False,
+        show_selected: bool = False,
+        show_description: bool = True,
+        instruction: str | None = None,
+        **kwargs,
+    ) -> Question:
+        if not (use_arrow_keys or use_shortcuts or use_jk_keys or use_emacs_keys):
+            raise ValueError(
+                "Some option to move the selection is required. Arrow keys, j/k keys, emacs keys, or shortcuts."
+            )
+        if use_jk_keys and use_search_filter:
+            raise ValueError(
+                "Cannot use j/k keys with prefix filter search, since j/k can be part of the prefix."
+            )
+        if use_shortcuts and use_jk_keys:
+            if any(getattr(choice, "shortcut_key", "") in ["j", "k"] for choice in choices):
+                raise ValueError(
+                    "A choice is trying to register j/k as a shortcut key when they are in use as arrow keys disable one or the other."
+                )
+        if choices is None or len(choices) == 0:
+            raise ValueError("A list of choices needs to be provided.")
+        if use_shortcuts:
+            real_len_of_choices = sum(1 for choice in choices if not isinstance(choice, Separator))
+            if real_len_of_choices > len(InquirerControl.SHORTCUT_KEYS):
+                raise ValueError(
+                    "A list with shortcuts supports a maximum of {} choices as this is the maximum number of keyboard shortcuts that are available. You provided {} choices!".format(
+                        len(InquirerControl.SHORTCUT_KEYS), real_len_of_choices
+                    )
+                )
+
+        merged_style = merge_styles_default([style])
+        ic = InquirerControl(
+            choices,
+            default,
+            pointer=pointer,
+            use_indicator=use_indicator,
+            use_shortcuts=use_shortcuts,
+            show_selected=show_selected,
+            show_description=show_description,
+            use_arrow_keys=use_arrow_keys,
+            initial_choice=default,
+        )
+        back_choice_value = VynexVpnApp._back_choice_value(choices)
+
+        def get_prompt_tokens():
+            tokens = [("class:qmark", qmark), ("class:question", f" {message} ")]
+            if ic.is_answered:
+                current_title = ic.get_pointed_at().title
+                if isinstance(current_title, list):
+                    tokens.append(("class:answer", "".join(token[1] for token in current_title)))
+                else:
+                    tokens.append(("class:answer", current_title))
+            else:
+                if instruction:
+                    instruction_msg = instruction
+                elif use_shortcuts and use_arrow_keys:
+                    instruction_msg = f"(Use shortcuts or arrow keys{', type to filter' if use_search_filter else ''})"
+                elif use_shortcuts and not use_arrow_keys:
+                    instruction_msg = f"(Use shortcuts{', type to filter' if use_search_filter else ''})"
+                else:
+                    instruction_msg = f"(Use arrow keys{', type to filter' if use_search_filter else ''})"
+                tokens.append(("class:instruction", instruction_msg))
+            return tokens
+
+        layout = common.create_inquirer_layout(ic, get_prompt_tokens, **kwargs)
+        bindings = KeyBindings()
+
+        @bindings.add(Keys.ControlQ, eager=True)
+        @bindings.add(Keys.ControlC, eager=True)
+        def abort_prompt(event):
+            event.app.exit(exception=KeyboardInterrupt, style="class:aborting")
+
+        if back_choice_value is not None:
+
+            @bindings.add(Keys.Escape, eager=True)
+            def select_back(event):
+                ic.is_answered = True
+                event.app.exit(result=back_choice_value)
+
+        if use_shortcuts:
+            for index, choice in enumerate(ic.choices):
+                if choice.shortcut_key is None and not choice.disabled and not use_arrow_keys:
+                    raise RuntimeError(
+                        f"{choice.title} does not have a shortcut and arrow keys for movement are disabled. This choice is not reachable."
+                    )
+                if isinstance(choice, Separator) or choice.shortcut_key is None or choice.disabled:
+                    continue
+
+                def _reg_binding(choice_index, keys):
+                    @bindings.add(keys, eager=True)
+                    def select_choice(event):
+                        ic.pointed_at = choice_index
+
+                _reg_binding(index, choice.shortcut_key)
+
+        def move_cursor_down(event):
+            ic.select_next()
+            while not ic.is_selection_valid():
+                ic.select_next()
+
+        def move_cursor_up(event):
+            ic.select_previous()
+            while not ic.is_selection_valid():
+                ic.select_previous()
+
+        if use_search_filter:
+
+            def search_filter(event):
+                ic.add_search_character(event.key_sequence[0].key)
+
+            for character in string.printable:
+                bindings.add(character, eager=True)(search_filter)
+            bindings.add(Keys.Backspace, eager=True)(search_filter)
+
+        if use_arrow_keys:
+            bindings.add(Keys.Down, eager=True)(move_cursor_down)
+            bindings.add(Keys.Up, eager=True)(move_cursor_up)
+        if use_jk_keys:
+            bindings.add("j", eager=True)(move_cursor_down)
+            bindings.add("k", eager=True)(move_cursor_up)
+        if use_emacs_keys:
+            bindings.add(Keys.ControlN, eager=True)(move_cursor_down)
+            bindings.add(Keys.ControlP, eager=True)(move_cursor_up)
+
+        @bindings.add(Keys.ControlM, eager=True)
+        def set_answer(event):
+            ic.is_answered = True
+            event.app.exit(result=ic.get_pointed_at().value)
+
+        @bindings.add(Keys.Any)
+        def other(event):
+            """Disallow inserting other text."""
+
+        return Question(
+            Application(
+                layout=layout,
+                key_bindings=bindings,
+                style=merged_style,
+                **utils.used_kwargs(kwargs, Application.__init__),
+            )
+        )
+
+    @staticmethod
     def _select(message: str, **kwargs):
         choices = kwargs.get("choices")
         kwargs = dict(kwargs)
         if choices is not None:
             kwargs["choices"] = VynexVpnApp._with_terminal_choice_spacing(choices)
         kwargs["style"] = VynexVpnApp._menu_select_style(kwargs.get("style"))
-        return questionary.select(message, instruction=" ", **kwargs)
+        return VynexVpnApp._select_with_escape_back(message, instruction=" ", **kwargs)
 
     @staticmethod
     def _subscription_default_title(url: str) -> str:

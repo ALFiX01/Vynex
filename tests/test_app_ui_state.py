@@ -3,7 +3,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from questionary import Choice
+
 from vynex_vpn_client.app import VynexVpnApp
+from vynex_vpn_client.backends import BaseVpnBackend
 from vynex_vpn_client.models import AppSettings, RuntimeState, ServerEntry
 from vynex_vpn_client.process_manager import State as XrayState
 
@@ -25,7 +28,32 @@ def _make_app(*, runtime_state: RuntimeState, manager_state: XrayState, manager_
     app.process_manager.state = manager_state
     app.process_manager.pid = manager_pid
     app.process_manager.is_running = Mock(return_value=False)
+    app.amneziawg_process_manager = Mock()
+    app.amneziawg_process_manager.state = XrayState.STOPPED
+    app.amneziawg_process_manager.pid = None
+    app.amneziawg_process_manager.is_running = Mock(return_value=False)
+    app.amneziawg_network_integration = Mock()
     app.singbox_process_manager = Mock()
+    xray_backend = Mock(spec=BaseVpnBackend)
+    xray_backend.backend_id = "xray"
+    xray_backend.engine_name = "xray"
+    xray_backend.engine_title = "Xray"
+    xray_backend.tun_interface_name = None
+    xray_backend.tun_route_prefixes = ()
+    xray_backend.process_controller = app.process_manager
+    xray_backend.supports_crash_recovery = True
+    awg_backend = Mock(spec=BaseVpnBackend)
+    awg_backend.backend_id = "amneziawg"
+    awg_backend.engine_name = "amneziawg"
+    awg_backend.engine_title = "AmneziaWG"
+    awg_backend.tun_interface_name = None
+    awg_backend.tun_route_prefixes = ()
+    awg_backend.process_controller = app.amneziawg_process_manager
+    awg_backend.supports_crash_recovery = False
+    app.backends = {
+        "xray": xray_backend,
+        "amneziawg": awg_backend,
+    }
     app._proxy_session = None
     app._runtime_notice = None
     app._disconnect_runtime = Mock()
@@ -66,6 +94,23 @@ def test_banner_status_line_shows_xray_recovery() -> None:
     assert "Test server" in line
 
 
+def test_banner_status_line_uses_awg_config_routing_label() -> None:
+    state = RuntimeState(
+        pid=1001,
+        backend_id="amneziawg",
+        mode="TUN",
+        server_id="server-1",
+        routing_profile_name="Умный",
+    )
+    app = _make_app(runtime_state=state, manager_state=XrayState.STOPPED)
+    app.amneziawg_process_manager.is_running.return_value = True
+
+    line = app._banner_status_line()
+
+    assert "из AWG-конфига" in line
+    assert "Умный" not in line
+
+
 def test_runtime_pid_label_shows_restart_marker_while_xray_recovers() -> None:
     state = RuntimeState(pid=1001, mode="PROXY")
     app = _make_app(runtime_state=state, manager_state=XrayState.CRASHED, manager_pid=None)
@@ -87,3 +132,13 @@ def test_server_choice_title_uses_console_safe_name() -> None:
         title = app._server_choice_title("srv 🚀", "VMESS", "example.com:443", 20, 5)
 
     assert "[U+1F680]" in title
+
+
+def test_back_choice_value_resolves_choice_value_after_terminal_styling() -> None:
+    back_choice = VynexVpnApp._style_terminal_choice(Choice(title="Назад", value="__back__"))
+
+    assert VynexVpnApp._back_choice_value([Choice(title="Вперёд", value="go"), back_choice]) == "__back__"
+
+
+def test_back_choice_value_returns_none_without_back_option() -> None:
+    assert VynexVpnApp._back_choice_value(["Открыть", "Выход"]) is None

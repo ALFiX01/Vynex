@@ -79,6 +79,15 @@ class JsonStorage:
                 servers[index] = server
                 self.save_servers(servers)
                 return server
+        if server.is_amneziawg:
+            for index, existing in enumerate(servers):
+                if not self._same_server_identity(existing, server):
+                    continue
+                server.id = existing.id
+                server.created_at = existing.created_at
+                servers[index] = server
+                self.save_servers(servers)
+                return server
         if server.raw_link:
             for index, existing in enumerate(servers):
                 if existing.raw_link == server.raw_link:
@@ -241,3 +250,13 @@ class JsonStorage:
 
     def save_settings(self, settings: AppSettings) -> None:
         self._write_json(SETTINGS_FILE, settings.to_dict())
+
+    @staticmethod
+    def _same_server_identity(left: ServerEntry, right: ServerEntry) -> bool:
+        if left.protocol.lower() != right.protocol.lower():
+            return False
+        if left.host.lower() != right.host.lower() or left.port != right.port:
+            return False
+        if not left.identity_token or not right.identity_token:
+            return False
+        return left.identity_token == right.identity_token
