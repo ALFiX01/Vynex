@@ -35,6 +35,7 @@
     {
       "type": "field",
       "domain": [
+        "geoip:cc",
         "geosite:youtube",
         "geosite:category-proxy-tunnels",
         "geosite:0x0"
