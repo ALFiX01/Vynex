@@ -21,6 +21,7 @@
 
 - Автоматическая загрузка последнего `Xray-core` для Windows 64-bit через GitHub API.
 - Автоматическая загрузка `geoip.dat`, `geosite.dat` и профилей маршрутизации из каталога `.database` репозитория Vynex VPN.
+- Полноценный self-update приложения через GitHub Releases: клиент сам находит свежий `VynexVPNClient.exe`, скачивает его, перезапускается и применяет обновление через внешний helper script.
 - Единый быстрый импорт: клиент сам определяет `vless://`, `vmess://`, `ss://`, URL подписки и Base64/список ссылок.
 - Импорт и обновление Base64-подписок.
 - Генерация `config.json` для `Proxy` режима с локальными `SOCKS5` и `HTTP` inbounds.
@@ -38,13 +39,15 @@
 3. Если серверов еще нет, на старте откроется экран быстрого импорта. Вставьте ссылку сервера, URL подписки или Base64/список ссылок.
 4. При необходимости откройте `Компоненты` и вручную обновите `xray.exe`, `geoip.dat`, `geosite.dat` и профили маршрутизации.
 5. При необходимости откройте `Настройки` и задайте локальные proxy-порты, системный proxy и активный набор маршрутизации.
-6. Выберите `Подключиться`, затем сервер.
+6. Если доступен новый релиз клиента, выберите `Обновить приложение до ...`: приложение скачает новый exe, завершит текущую сессию и перезапустится.
+7. Выберите `Подключиться`, затем сервер.
 
 ## Примечания
 
 - Данные приложения сохраняются в `%LOCALAPPDATA%\VynexVPNClient\`.
 - Конфиги и состояние лежат в `%LOCALAPPDATA%\VynexVPNClient\data\`.
 - Файлы Xray runtime (`xray.exe`, `geoip.dat`, `geosite.dat`) лежат в `%LOCALAPPDATA%\VynexVPNClient\xray\`.
+- Self-update staging-файлы и helper script лежат в `%LOCALAPPDATA%\VynexVPNClient\updates\`.
 - Профили маршрутизации лежат по одному JSON-файлу в `%LOCALAPPDATA%\VynexVPNClient\data\routing_profiles\`.
 - `geoip.dat` и `geosite.dat` скачиваются из каталога `.database`:
   - `https://raw.githubusercontent.com/ALFiX01/Vynex/main/.database/geoip.dat`

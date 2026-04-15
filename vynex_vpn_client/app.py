@@ -8,7 +8,6 @@ import sys
 import threading
 from typing import Callable
 from urllib.parse import urlparse
-import webbrowser
 
 import questionary
 from questionary import Choice, Separator, Style
@@ -25,6 +24,7 @@ if __package__ in {None, ""}:
         sys.path.insert(0, str(package_root))
 
     from vynex_vpn_client.app_update import AppReleaseInfo, AppUpdateChecker
+    from vynex_vpn_client.app_updater import AppSelfUpdater
     from vynex_vpn_client.config_builder import XrayConfigBuilder
     from vynex_vpn_client.constants import (
         APP_NAME,
@@ -64,6 +64,7 @@ if __package__ in {None, ""}:
     )
 else:
     from .app_update import AppReleaseInfo, AppUpdateChecker
+    from .app_updater import AppSelfUpdater
     from .config_builder import XrayConfigBuilder
     from .constants import (
         APP_NAME,
@@ -118,6 +119,7 @@ class VynexVpnApp:
         self.installer = XrayInstaller()
         self.singbox_installer = SingboxInstaller()
         self.app_update_checker = AppUpdateChecker()
+        self.app_updater = AppSelfUpdater()
         self.subscription_manager = SubscriptionManager(self.storage)
         self.routing_profiles = RoutingProfileManager()
         self.config_builder = XrayConfigBuilder()
@@ -130,6 +132,7 @@ class VynexVpnApp:
         self._app_update_thread: threading.Thread | None = None
         self._proxy_session: ProxyRuntimeSession | None = None
         self._runtime_notice: str | None = None
+        self._should_exit = False
         self.logo = self._load_logo()
 
     def run(self) -> int:
@@ -146,6 +149,8 @@ class VynexVpnApp:
                 if action.title == "Выход":
                     return 0
                 action.handler()
+                if self._should_exit:
+                    return 0
         except KeyboardInterrupt:
             self.console.print("\n[bold yellow]Завершение по Ctrl+C[/bold yellow]")
             return 0
@@ -1347,14 +1352,14 @@ class VynexVpnApp:
         release_info = self._available_app_update()
         if release_info is None or not release_info.latest_version:
             return "-"
-        return release_info.latest_version
+        return self._display_version(release_info.latest_version)
 
     def _app_update_menu_action(self) -> MenuAction | None:
         release_info = self._available_app_update()
         if release_info is None:
             return None
         return MenuAction(
-            f"Скачать обновление: {self._available_app_update_label()}",
+            f"Обновить приложение до {self._available_app_update_label()}",
             self.open_app_update_page_flow,
         )
 
@@ -1434,7 +1439,7 @@ class VynexVpnApp:
         routing_name = escape(self._shorten_text(self._active_routing_profile_name(), 28))
         update_suffix = ""
         if self._available_app_update() is not None:
-            update_suffix = f" | [bold yellow]Доступна новая версия:[/bold yellow] v{escape(self._available_app_update_label())}"
+            update_suffix = f" | [bold yellow]Доступна новая версия:[/bold yellow] {escape(self._available_app_update_label())}"
         if state.is_running:
             server = self.storage.get_server(state.server_id) if state.server_id else None
             server_name = escape(
@@ -1544,40 +1549,146 @@ class VynexVpnApp:
 
     def open_app_update_page_flow(self) -> None:
         try:
+            cached_release = self.app_release_info
+            self._show_app_update_status(cached_release, step="Проверка релиза", status="Запрашивается latest release из GitHub.")
+            self._check_app_update(force=True)
             release_info = self._available_app_update()
             if release_info is None:
+                if self.app_release_info is not None and self.app_release_info.error:
+                    raise RuntimeError(self.app_release_info.error)
                 self._render_screen()
                 self.console.print(Panel.fit("Новая версия не найдена.", border_style="yellow"))
                 self._pause()
                 return
-            release_url = release_info.release_url
-            if not release_url:
-                raise RuntimeError("Не найдена ссылка на релиз приложения.")
-            opened = bool(webbrowser.open(release_url))
-            if not opened and hasattr(os, "startfile"):
-                os.startfile(release_url)
-                opened = True
-            if not opened:
-                raise RuntimeError("Не удалось открыть страницу новой версии в браузере.")
-            table = Table(show_header=False, box=None, pad_edge=False)
-            table.add_column("Параметр", no_wrap=True, style="bold")
-            table.add_column("Значение", overflow="fold", max_width=max(32, self.console.width - 34))
-            table.add_row("Текущая", f"v{APP_VERSION}")
-            table.add_row("Новая", self._available_app_update_label())
-            table.add_row("Ссылка", release_url)
             self._render_screen()
             self.console.print(
                 Panel.fit(
-                    table,
-                    title="Открыта страница релиза",
-                    border_style="green",
+                    self._app_update_details_table(release_info),
+                    title="Доступно обновление приложения",
+                    border_style="cyan",
                 )
             )
-            self._pause()
+            if not self.app_updater.can_self_update():
+                self.console.print(
+                    Panel.fit(
+                        "Текущий запуск работает не из packaged Windows .exe сборки.\n"
+                        "Self-update недоступен, но проверка обновлений продолжит работать.\n"
+                        f"Скачайте новую версию вручную: {release_info.release_url or '-'}",
+                        title="Self-update недоступен",
+                        border_style="yellow",
+                    )
+                )
+                self._pause()
+                return
+
+            runtime_state = self._current_state()
+            confirmation_message = "Скачать и установить обновление сейчас?"
+            if runtime_state.is_running:
+                confirmation_message = (
+                    "Скачать и установить обновление сейчас?\n"
+                    "Активное подключение будет остановлено, приложение перезапустится автоматически."
+                )
+            should_update = questionary.confirm(
+                confirmation_message,
+                default=True,
+            ).ask()
+            if not should_update:
+                return
+
+            self._show_app_update_status(release_info, step="Загрузка", status="Скачивается новый exe во временную директорию.")
+            download = self.app_updater.download_release(release_info)
+
+            self._show_app_update_status(
+                release_info,
+                step="Подготовка обновления",
+                status=f"Готовится staging-файл {download.staged_executable.name} и helper script.",
+            )
+            plan = self.app_updater.prepare_apply_plan(download, current_pid=os.getpid())
+            self.app_updater.write_helper_script(plan)
+
+            self._show_app_update_status(
+                release_info,
+                step="Завершение приложения",
+                status="Клиент остановит runtime-процессы и передаст управление helper script.",
+            )
+            self._shutdown()
+
+            self._show_app_update_status(
+                release_info,
+                step="Запуск новой версии",
+                status="Приложение будет перезапущено автоматически.",
+            )
+            self.app_updater.launch_helper(plan)
+            self._should_exit = True
         except Exception as exc:  # noqa: BLE001
             self._render_screen()
             self._show_error("Ошибка обновления приложения", exc)
             self._pause()
+
+    def _app_update_details_table(self, release_info: AppReleaseInfo | None, *, step: str | None = None, status: str | None = None) -> Table:
+        table = Table(show_header=False, box=None, pad_edge=False)
+        table.add_column("Параметр", no_wrap=True, style="bold")
+        table.add_column("Значение", overflow="fold", max_width=max(32, self.console.width - 34))
+        table.add_row("Текущая", self._display_version(APP_VERSION))
+        if release_info is not None:
+            table.add_row("Новая", self._display_version(release_info.latest_version) if release_info.latest_version else "-")
+        else:
+            table.add_row("Новая", "-")
+        if release_info is not None:
+            table.add_row("Файл", release_info.asset_name or "-")
+            table.add_row("Размер", self._format_file_size(release_info.asset_size))
+            table.add_row("Опубликован", release_info.published_at or "-")
+            table.add_row("Релиз", release_info.release_url or "-")
+            if release_info.release_notes:
+                notes_preview = release_info.release_notes.replace("\r", " ").replace("\n", " ")
+                table.add_row("Описание", self._shorten_text(notes_preview, 240))
+            if release_info.error:
+                table.add_row("Ошибка", release_info.error)
+        if step:
+            table.add_row("Этап", step)
+        if status:
+            table.add_row("Статус", status)
+        return table
+
+    def _show_app_update_status(
+        self,
+        release_info: AppReleaseInfo | None,
+        *,
+        step: str,
+        status: str,
+        border_style: str = "cyan",
+    ) -> None:
+        self._render_screen()
+        self.console.print(
+            Panel.fit(
+                self._app_update_details_table(release_info, step=step, status=status),
+                title="Обновление приложения",
+                border_style=border_style,
+            )
+        )
+
+    @staticmethod
+    def _format_file_size(size_bytes: int | None) -> str:
+        if size_bytes is None or size_bytes < 0:
+            return "-"
+        units = ("B", "KB", "MB", "GB")
+        size = float(size_bytes)
+        unit_index = 0
+        while size >= 1024 and unit_index < len(units) - 1:
+            size /= 1024
+            unit_index += 1
+        if unit_index == 0:
+            return f"{int(size)} {units[unit_index]}"
+        return f"{size:.1f} {units[unit_index]}"
+
+    @staticmethod
+    def _display_version(version: str | None) -> str:
+        normalized = str(version or "").strip()
+        if not normalized:
+            return "-"
+        if normalized.lower().startswith("v"):
+            return normalized
+        return f"v{normalized}"
 
     def _error_guidance(self, title: str, error: Exception | str) -> tuple[str, list[str], str]:
         details = self._error_text(error)
@@ -1837,12 +1948,48 @@ class VynexVpnApp:
                 )
 
         if title == "Ошибка обновления приложения":
-            if "открыть страницу новой версии" in normalized or "ссылка на релиз" in normalized:
+            if "packaged windows build" in normalized or "windows .exe сборки" in normalized:
                 return (
-                    "Клиент не смог открыть страницу новой версии в браузере.",
+                    "Этот запуск работает не из собранного Windows exe, поэтому self-update отключен.",
                     [
-                        "Проверьте, что в системе настроен браузер по умолчанию.",
-                        "Если проблема повторяется, откройте страницу релизов GitHub вручную.",
+                        "Используйте собранный `VynexVPNClient.exe`, если нужен self-update внутри приложения.",
+                        "Проверка новых релизов GitHub продолжит работать и в режиме запуска из исходников.",
+                    ],
+                    details,
+                )
+            if "latest release отсутствует exe-asset" in normalized or "не найден exe-asset" in normalized:
+                return (
+                    "GitHub release найден, но в нем нет exe-файла приложения для self-update.",
+                    [
+                        "Проверьте assets у последнего релиза репозитория.",
+                        "Переопубликуйте релиз с `VynexVPNClient.exe` или другим `.exe` asset.",
+                    ],
+                    details,
+                )
+            if "превышено время ожидания" in normalized or "timeout" in normalized:
+                return (
+                    "Не удалось завершить сетевой запрос к GitHub вовремя.",
+                    [
+                        "Проверьте подключение к интернету и повторите обновление.",
+                        "Если GitHub временно недоступен, повторите попытку позже.",
+                    ],
+                    details,
+                )
+            if "размер скачанного файла не совпадает" in normalized or "размер сохраненного файла не совпадает" in normalized:
+                return (
+                    "Скачанный exe поврежден или загрузился не полностью.",
+                    [
+                        "Повторите обновление: staging-файл будет скачан заново.",
+                        "Если проблема повторяется, проверьте asset последнего релиза GitHub.",
+                    ],
+                    details,
+                )
+            if "helper script" in normalized:
+                return (
+                    "Клиент не смог подготовить или запустить внешний helper script обновления.",
+                    [
+                        "Проверьте права записи в `%LOCALAPPDATA%\\VynexVPNClient\\updates`.",
+                        "Если ошибка повторяется, скачайте новую версию вручную из GitHub Releases.",
                     ],
                     details,
                 )
