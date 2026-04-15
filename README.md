@@ -1,127 +1,265 @@
-<div align="center">
-  
 # Vynex
 
-</div>  
+**Современный VPN-клиент для Windows 10/11 с терминальным интерфейсом, быстрым импортом конфигов и управлением подключением через Xray и AmneziaWG.**
 
-  <p align="center">
-    <a href="https://github.com/ALFiX01/Vynex/releases/latest"><img src="https://img.shields.io/github/v/release/ALFiX01/Vynex?style=plastic" alt="GitHub Release"></a>
-    <a href="https://github.com/ALFiX01/Vynex/stargazers"><img src="https://img.shields.io/github/stars/ALFiX01/Vynex?style=plastic" alt="GitHub Stars"></a>
-    <a href="https://github.com/ALFiX01/Vynex/releases"><img src="https://img.shields.io/github/downloads/ALFiX01/Vynex/total?style=plastic" alt="GitHub Downloads"></a>
-    <a href="https://github.com/ALFiX01/Vynex/releases"><img src="https://img.shields.io/github/downloads/ALFiX01/Vynex/VynexVPNClient.exe?style=plastic" alt="GitHub EXE Downloads"></a>
-  </p>
-
-Консольный VPN-клиент для Windows 10/11, который управляет `xray.exe`, импортирует сервера и подписки и запускает Xray-core в двух режимах:
-
-- `PROXY`: локальные `SOCKS5` + `HTTP` inbounds и, при желании, системный proxy Windows.
-- `TUN`: системный IPv4 tunneling через `tun` inbound Xray с автоматической установкой маршрутов Windows.
+Vynex помогает быстро перейти от ссылки или конфига к рабочему подключению: импортирует серверы и подписки, сам подтягивает runtime-компоненты, умеет работать в режимах `PROXY` и `TUN`, хранит состояние локально и поддерживает self-update для packaged Windows-сборки.
 
 <p align="center">
-    💖 <a href="https://pay.cloudtips.ru/p/b98d1870"><b>Поддержать разработчика</b></a>
+  <a href="https://github.com/ALFiX01/Vynex/releases/latest"><img src="https://img.shields.io/github/v/release/ALFiX01/Vynex?style=flat-square" alt="Latest Release"></a>
+  <a href="https://github.com/ALFiX01/Vynex/stargazers"><img src="https://img.shields.io/github/stars/ALFiX01/Vynex?style=flat-square" alt="GitHub Stars"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-0f172a?style=flat-square" alt="MIT License"></a>
+  <img src="https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0ea5e9?style=flat-square" alt="Windows 10/11">
 </p>
 
-## Возможности
+<!-- TODO: добавить короткий GIF или 1-2 скриншота главного меню, импорта и экрана подключения -->
 
-- Автоматическая загрузка последнего `Xray-core` для Windows 64-bit через GitHub API.
-- Автоматическая догрузка `wintun.dll` вместе с `xray.exe`, если он нужен для `TUN` режима.
-- Автоматическая загрузка `geoip.dat`, `geosite.dat` и профилей маршрутизации из каталога `.database` репозитория Vynex.
-- Полноценный self-update приложения через GitHub Releases: клиент сам находит свежий `VynexVPNClient.exe`, скачивает его, перезапускается и применяет обновление через внешний helper script.
-- Единый быстрый импорт: клиент сам определяет `vless://`, `vmess://`, `trojan://`, `ss://`, `hy2://`, URL подписки и Base64/список ссылок.
-- Импорт и обновление Base64-подписок.
-- Генерация `config.json` для `PROXY` и `TUN` режима на базе одного `XrayConfigBuilder`.
-- Общие routing profiles для обоих режимов подключения.
-- Отдельный пункт `Компоненты` для ручного обновления `xray.exe`, `geoip.dat`, `geosite.dat` и профилей маршрутизации.
-- Отдельный пункт `Настройки` для выбора режима подключения, системного proxy для `PROXY` режима и активного набора маршрутизации.
-- Быстрый ручной сброс системного proxy Windows из `Настройки`.
-- Фоновый запуск `xray.exe` без черного окна через `subprocess.CREATE_NO_WINDOW`.
-- Корректная остановка Xray при отключении и выходе из приложения.
-- Понятная диагностика ошибок запуска: отсутствие admin rights, отсутствие `wintun.dll`, несовместимая версия Xray, ошибки инициализации TUN и ошибки установки маршрутов.
+## Что Это За Проект
 
-## Режимы подключения
+Vynex — это Windows CLI/TUI-клиент для повседневной работы с VPN-подключениями без ручной сборки конфигов и постоянного переключения между разными утилитами.
 
-### PROXY
+Проект берет на себя типичные рутинные задачи:
 
-- Использует локальные `SOCKS5` и `HTTP` inbounds Xray на случайных портах текущей сессии.
+- импорт серверов из share-link, подписки, `vpn://`-ключа, AWG-конфига или JSON;
+- подготовку runtime-компонентов для подключения;
+- запуск локального proxy или TUN-режима;
+- обновление компонентов и самого приложения;
+- хранение серверов, подписок, настроек и runtime-состояния в `%LOCALAPPDATA%`.
+
+Если коротко: Vynex нужен тем, кто хочет быстро импортировать конфиг, выбрать сервер и подключиться без ручной возни с `xray.exe`, маршрутами и Windows proxy.
+
+## Почему Это Полезно
+
+- **Быстрый вход.** На первом запуске можно просто вставить ссылку, URL подписки или конфиг и сразу перейти к подключению.
+- **Один клиент для разных сценариев.** `PROXY` подходит для локального SOCKS/HTTP и системного proxy, `TUN` — для системного туннелирования IPv4.
+- **Автоматизация Windows-рутины.** Клиент сам скачивает нужные компоненты, применяет маршруты и помогает диагностировать проблемы запуска.
+- **Поддержка реальных пользовательских форматов.** Проект понимает не только share-link, но и Base64, plain-text списки, `vpn://`, AWG `.conf`, Xray/sing-box/Clash JSON.
+- **Удобство без потери контроля.** Есть явные экраны для серверов, подписок, компонентов, настроек и статуса подключения.
+
+## Ключевые Возможности
+
+- Импорт `vless://`, `vmess://`, `trojan://`, `ss://`, `hy2://`, `hysteria2://`.
+- Импорт URL-подписок и ручное обновление всех подписок.
+- Импорт `vpn://` payload-ов, AWG-конфигов и путей к `.conf`.
+- Импорт JSON-конфигов Xray, sing-box и Clash с извлечением поддерживаемых outbound/proxy.
+- Автоопределение формата входных данных при быстром импорте.
+- Подключение через backend `xray` и `amneziawg`.
+- Режим `PROXY` с локальными `SOCKS5` + `HTTP` inbound и опциональным системным proxy Windows.
+- Режим `TUN` с автоматическим поднятием интерфейса и установкой IPv4-маршрутов.
+- Загрузка и обновление `xray.exe`, `wintun.dll`, `geoip.dat`, `geosite.dat`, routing profiles и runtime для AmneziaWG.
+- Self-update приложения через GitHub Releases для packaged `.exe`-сборки.
+- Локальное хранение серверов, подписок, настроек, логов и runtime-state.
+- Понятная диагностика проблем: права администратора, несовместимая версия Xray, `wintun.dll`, маршруты, health-check и конфликты с другими VPN/TUN-драйверами.
+
+## Режимы Подключения
+
+### `PROXY`
+
+Подходит, если нужен локальный прокси для приложений или системный proxy Windows.
+
+- Поднимает локальные `SOCKS5` и `HTTP` inbound на случайных портах текущей сессии.
 - Может автоматически включать системный proxy Windows.
-- Не требует запуска приложения от администратора.
+- Не требует запуска приложения от имени администратора.
 
-### TUN
+### `TUN`
 
-- Использует `tun` inbound в `xray.exe`.
-- Поднимает интерфейс `VynexTun`, затем автоматически добавляет Windows-маршруты `0.0.0.0/1` и `128.0.0.0/1`.
-- Использует активный routing profile для правил `direct/proxy/block`, а весь остальной IPv4-трафик отправляет через outbound `proxy`.
+Подходит, если нужен системный IPv4-трафик через VPN.
+
+- Использует `tun` inbound в `xray.exe` или backend `AmneziaWG`, в зависимости от выбранного сервера.
+- Для Xray автоматически добавляет маршруты `0.0.0.0/1` и `128.0.0.0/1`.
+- Использует активный routing profile для правил `direct` / `proxy` / `block`.
 - Требует запуск приложения от имени администратора.
 
-## Требования для TUN на Windows
+## Быстрый Старт
 
-- Windows 10/11.
-- `Xray-core` с поддержкой `tun` inbound. Практически клиент ожидает версию не ниже `26.1.13`.
-- Наличие `wintun.dll` рядом с `xray.exe` в `%LOCALAPPDATA%\VynexVPNClient\xray\`.
-- Рабочий IPv4 default route у системы, чтобы клиент мог определить физический интерфейс для outbound Xray.
+### Вариант 1. Запуск готовой Windows-сборки
 
-Если `TUN` не стартует, клиент показывает причину до или сразу после запуска Xray:
+1. Скачайте `VynexVPNClient.exe` из [последнего релиза](https://github.com/ALFiX01/Vynex/releases/latest).
+2. Запустите приложение.
+3. Если runtime-компоненты отсутствуют, Vynex сам попытается их подготовить.
+4. Вставьте ссылку сервера, `vpn://`-ключ, URL подписки или AWG-конфиг.
+5. Выберите режим подключения и подключитесь к нужному серверу.
 
-- нет прав администратора;
-- отсутствует или поврежден `wintun.dll`;
-- версия `xray.exe` слишком старая;
-- Windows не подняла TUN интерфейс вовремя;
-- Windows не приняла маршруты для TUN;
-- другой VPN/TUN-драйвер конфликтует с маршрутизацией.
+### Вариант 2. Запуск из исходников
 
-## Как использовать
+Требования:
 
-1. Запустите приложение.
-2. При первом старте клиент сам скачает `xray.exe`, если бинарник отсутствует.
-3. Если серверов еще нет, на старте откроется экран быстрого импорта. Вставьте ссылку сервера, URL подписки или Base64/список ссылок.
-4. При необходимости откройте `Компоненты` и вручную обновите `xray.exe`, `geoip.dat`, `geosite.dat` и профили маршрутизации.
-5. В `Настройки` выберите режим подключения (`PROXY` или `TUN`) и нужный routing profile.
-6. Если выбран `TUN`, перезапустите приложение через `Запуск от имени администратора`.
-7. Выберите `Подключиться`, затем сервер.
-8. Если доступен новый релиз клиента, выберите `Обновить приложение до ...`: приложение скачает новый exe, завершит текущую сессию и перезапустится.
+- Windows 10/11
+- Python `3.10+`
 
-## Диагностика
+Установка:
 
-- Основной лог Xray: `%LOCALAPPDATA%\VynexVPNClient\logs\xray-core.log`
-- Runtime-файлы: `%LOCALAPPDATA%\VynexVPNClient\xray\`
+```powershell
+py -3 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+python main.py
+```
+
+## Установка И Подготовка
+
+При обычном сценарии отдельная ручная установка `xray.exe` не нужна:
+
+- Vynex сначала проверяет локальный runtime;
+- если компонентов нет, пытается скачать их автоматически;
+- для `TUN` дополнительно проверяет совместимую версию Xray и наличие `wintun.dll`;
+- для AmneziaWG подготавливает отдельный runtime-каталог.
+
+Если хотите обновить компоненты вручную, это можно сделать из раздела `Компоненты` внутри приложения.
+
+## Пример Использования
+
+### Импорт одного сервера
+
+Вставьте в быстрый импорт share-link:
+
+```text
+vless://uuid@example.com:443?security=reality&type=tcp#My%20Server
+```
+
+### Импорт подписки
+
+Вставьте URL:
+
+```text
+https://example.com/subscription
+```
+
+### Импорт AWG-конфига
+
+Можно вставить содержимое `.conf` или передать путь к файлу:
+
+```text
+C:\Users\YourName\Downloads\my-awg.conf
+```
+
+После импорта:
+
+1. Откройте `Настройки`.
+2. Выберите режим подключения.
+3. Для `TUN` перезапустите приложение от имени администратора.
+4. Нажмите `Подключиться` и выберите сервер.
+
+## Что Поддерживает Импорт
+
+Vynex умеет распознавать:
+
+- одиночные share-link;
+- URL подписок;
+- Base64 и plain-text списки ссылок;
+- `vpn://` payload-ы;
+- конфиги AmneziaWG;
+- JSON-представления Xray;
+- JSON-конфиги sing-box;
+- JSON-конфиги Clash.
+
+Если входной формат не распознан, клиент явно сообщает об ошибке, а не молча игнорирует данные.
+
+## Диагностика И Ограничения
+
+### Где искать данные и логи
+
+- Логи Xray: `%LOCALAPPDATA%\VynexVPNClient\logs\xray-core.log`
+- Логи AmneziaWG: `%LOCALAPPDATA%\VynexVPNClient\logs\amneziawg.log`
 - Состояние и настройки: `%LOCALAPPDATA%\VynexVPNClient\data\`
+- Runtime Xray: `%LOCALAPPDATA%\VynexVPNClient\xray\`
+- Runtime AmneziaWG: `%LOCALAPPDATA%\VynexVPNClient\amneziawg\`
+- Файлы self-update: `%LOCALAPPDATA%\VynexVPNClient\updates\`
 
-Типовые причины ошибок и что проверить:
+### Что важно знать заранее
 
-- `TUN режим требует запуска приложения от имени администратора`
-  Запустите `VynexVPNClient.exe` с повышенными правами.
-- `wintun.dll`
-  Обновите `Xray-core` через `Компоненты`, проверьте, не удален ли DLL антивирусом.
-- `не поддерживает TUN режим`
-  Обновите `xray.exe` до свежей версии.
-- `TUN интерфейс ... IPv4`
-  Дождитесь полной инициализации сети или проверьте конфликт с другим VPN/TUN драйвером.
-- `Не удалось добавить маршрут`
-  Проверьте admin rights и убедитесь, что другой VPN-клиент не удерживает таблицу маршрутов.
-- `health-check не прошел`
-  Ядро стартовало, но сеть через выбранный сервер недоступна; попробуйте другой сервер или обновите компоненты.
-
-Для `TUN` быстрый health-check теперь считается диагностикой, а не жестким условием старта:
-
-- если `xray.exe`, TUN-интерфейс и маршруты подняты, но probe-URL не ответили вовремя, клиент оставит TUN активным и покажет предупреждение;
-- после этого стоит вручную проверить нужные сайты или приложения, потому что probe-URL могут давать ложный негатив на отдельных серверах.
-
-## Ограничения
-
-- `TUN` в текущей реализации перехватывает IPv4. Активный системный IPv6 может обходить туннель.
-- `PROXY` и `TUN` используют одно ядро `xray.exe`, но системный proxy применяется только в `PROXY`.
+- `TUN` в текущей реализации ориентирован на IPv4; активный системный IPv6 может обходить туннель.
+- `PROXY` и `TUN` используют разные сценарии подключения, но системный proxy применяется только в `PROXY`.
+- Для `TUN` нужны права администратора.
 - Одновременная работа с другим VPN/TUN-клиентом может мешать поднятию интерфейса или установке маршрутов.
-- Импорт серверов, подписки и хранение данных остаются обратно совместимыми; переключение режима не меняет формат сохраненных серверов.
+- Для self-update приложение должно быть запущено из packaged Windows `.exe`; при запуске из исходников доступна только проверка обновлений.
 
-## Примечания
+## FAQ
 
-- Данные приложения сохраняются в `%LOCALAPPDATA%\VynexVPNClient\`.
-- Конфиги и состояние лежат в `%LOCALAPPDATA%\VynexVPNClient\data\`.
-- Файлы Xray runtime (`xray.exe`, `wintun.dll`, `geoip.dat`, `geosite.dat`) лежат в `%LOCALAPPDATA%\VynexVPNClient\xray\`.
-- Self-update staging-файлы и helper script лежат в `%LOCALAPPDATA%\VynexVPNClient\updates\`.
-- Профили маршрутизации лежат по одному JSON-файлу в `%LOCALAPPDATA%\VynexVPNClient\data\routing_profiles\`.
-- `geoip.dat` и `geosite.dat` скачиваются из каталога `.database`:
-  - `https://raw.githubusercontent.com/ALFiX01/Vynex/main/.database/geoip.dat`
-  - `https://raw.githubusercontent.com/ALFiX01/Vynex/main/.database/geosite.dat`
-- Профили маршрутизации подтягиваются из:
-  - `https://api.github.com/repos/ALFiX01/Vynex/contents/.database/routing_profiles`
-- Если geo-файлы не удалось скачать, клиент покажет предупреждение при старте.
+### Почему `TUN` не запускается?
+
+Чаще всего причина одна из следующих:
+
+- приложение запущено без прав администратора;
+- отсутствует или поврежден `wintun.dll`;
+- версия `xray.exe` слишком старая для `TUN`;
+- Windows не успела поднять TUN-интерфейс;
+- маршруты блокируются другим VPN-клиентом или TUN-драйвером.
+
+### Что делать, если health-check не прошел?
+
+Это не всегда означает, что подключение полностью не работает. В проекте health-check используется как диагностика: если runtime и маршруты поднялись, но probe URL не ответили вовремя, клиент может оставить `TUN` активным и показать предупреждение.
+
+### Можно ли использовать AmneziaWG в `PROXY`-режиме?
+
+Нет. Текущая реализация backend `AmneziaWG` поддерживает только `TUN`.
+
+### Где хранятся серверы и подписки?
+
+В `%LOCALAPPDATA%\VynexVPNClient\data\`, включая `servers.json`, `subscriptions.json`, `settings.json` и `runtime_state.json`.
+
+## Для Разработчиков
+
+Структура проекта в текущем виде:
+
+- `main.py` — точка входа.
+- `vynex_vpn_client/app.py` — терминальный интерфейс и пользовательские сценарии.
+- `vynex_vpn_client/core.py` — подготовка и обновление runtime-компонентов.
+- `vynex_vpn_client/backends.py` — выбор backend и запуск Xray / AmneziaWG.
+- `vynex_vpn_client/parsers.py` — импорт серверов, подписок, JSON и `vpn://`.
+- `tests/` — тесты по runtime, backend-ам, импорту и сетевой интеграции.
+
+### Запуск тестов
+
+`pytest` используется в репозитории, но не указан в `requirements.txt`, поэтому его нужно установить отдельно:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+pip install pytest
+pytest
+```
+
+### Сборка Windows `.exe`
+
+```powershell
+.\build.ps1
+```
+
+Скрипт сборки:
+
+- использует существующий virtualenv, если он найден;
+- при необходимости создает isolated build-venv;
+- ставит зависимости и `PyInstaller`;
+- собирает `dist\VynexVPNClient.exe`.
+
+## Contributing
+
+Проект уже имеет хорошую базу для развития: backend-архитектуру, отдельные runtime-менеджеры, покрытие тестами и понятную структуру модулей. Если хотите помочь проекту, полезнее всего:
+
+- открыть issue с воспроизводимым сценарием;
+- предложить улучшение импорта, UX, диагностики или Windows networking;
+- прислать PR с тестами для новых сценариев;
+- помочь с документацией, примерами и onboarding для новых пользователей.
+
+<!-- TODO: добавить CONTRIBUTING.md с правилами оформления PR, code style, expected test workflow и описанием веток -->
+
+## Лицензия
+
+Проект распространяется под лицензией [MIT](LICENSE).
+
+## Поддержка Проекта
+
+Если Vynex оказался полезен:
+
+- попробуйте его на своих конфигурациях;
+- поставьте репозиторию star;
+- откройте issue, если нашли проблему или хотите улучшение;
+- отправьте pull request, если хотите помочь кодом или документацией.
+- при желании поддержите разработку: https://pay.cloudtips.ru/p/b98d1870
+
+<p align="center">
+  <a href="https://github.com/ALFiX01/Vynex/stargazers">Star on GitHub</a>
+  ·
+  <a href="https://github.com/ALFiX01/Vynex/issues">Open an Issue</a>
+  ·
+  <a href="https://github.com/ALFiX01/Vynex/releases/latest">Try the Latest Release</a>
+</p>
