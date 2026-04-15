@@ -91,6 +91,11 @@ class RuntimeState:
     previous_system_proxy: dict[str, Any] | None = None
     routing_profile_id: str | None = None
     routing_profile_name: str | None = None
+    tun_interface_name: str | None = None
+    tun_interface_index: int | None = None
+    tun_interface_ipv4: str | None = None
+    tun_route_prefixes: list[str] = field(default_factory=list)
+    outbound_interface_name: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -107,6 +112,15 @@ class RuntimeState:
             previous_system_proxy=data.get("previous_system_proxy"),
             routing_profile_id=data.get("routing_profile_id"),
             routing_profile_name=data.get("routing_profile_name"),
+            tun_interface_name=data.get("tun_interface_name"),
+            tun_interface_index=data.get("tun_interface_index"),
+            tun_interface_ipv4=data.get("tun_interface_ipv4"),
+            tun_route_prefixes=[
+                str(prefix)
+                for prefix in data.get("tun_route_prefixes", [])
+                if str(prefix).strip()
+            ],
+            outbound_interface_name=data.get("outbound_interface_name"),
         )
 
     @property

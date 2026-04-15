@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import re
 import shutil
+import subprocess
 import zipfile
 from pathlib import Path
 
@@ -16,12 +18,15 @@ from .constants import (
     SINGBOX_ARCHIVE_PATH,
     SINGBOX_EXECUTABLE,
     SINGBOX_RELEASES_API,
+    WINTUN_DLL,
     XRAY_ARCHIVE_PATH,
     XRAY_BUNDLED_FILES,
     XRAY_EXECUTABLE,
     XRAY_RELEASES_API,
     XRAY_RUNTIME_DIR,
 )
+
+XRAY_MINIMUM_TUN_VERSION = (26, 1, 13)
 
 
 class XrayInstaller:
@@ -44,6 +49,28 @@ class XrayInstaller:
             return XRAY_EXECUTABLE
         self.update_xray()
         self._ensure_geo_data_files(download_missing_only=True)
+        return XRAY_EXECUTABLE
+
+    def ensure_xray_tun_runtime(self) -> Path:
+        self.ensure_xray()
+        version = self.get_xray_version()
+        if version is None or version < XRAY_MINIMUM_TUN_VERSION or not WINTUN_DLL.exists():
+            self.update_xray()
+            version = self.get_xray_version()
+        if version is None:
+            raise RuntimeError("Не удалось определить версию Xray-core для TUN режима.")
+        if version < XRAY_MINIMUM_TUN_VERSION:
+            version_text = ".".join(str(part) for part in version)
+            minimum_text = ".".join(str(part) for part in XRAY_MINIMUM_TUN_VERSION)
+            raise RuntimeError(
+                f"Текущая версия Xray-core ({version_text}) не поддерживает TUN режим. "
+                f"Нужна версия не ниже {minimum_text}."
+            )
+        if not WINTUN_DLL.exists():
+            raise RuntimeError(
+                "В runtime-каталоге отсутствует wintun.dll. "
+                "Обновите Xray-core через 'Компоненты' или проверьте целостность runtime."
+            )
         return XRAY_EXECUTABLE
 
     def update_xray(self) -> Path:
@@ -139,6 +166,7 @@ class XrayInstaller:
                         continue
                     lower_name = name.lower()
                     if lower_name == "xray.exe" or lower_name in {
+                        "wintun.dll",
                         "geoip.dat",
                         "geosite.dat",
                     }:
@@ -151,6 +179,27 @@ class XrayInstaller:
                     raise RuntimeError("В архиве Xray-core отсутствует xray.exe.")
         except zipfile.BadZipFile as exc:
             raise RuntimeError("Архив Xray-core поврежден или имеет неверный формат.") from exc
+
+    @staticmethod
+    def get_xray_version(executable_path: Path | None = None) -> tuple[int, int, int] | None:
+        target = executable_path or XRAY_EXECUTABLE
+        if not target.exists():
+            return None
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        result = subprocess.run(
+            [str(target), "version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            creationflags=creationflags,
+        )
+        output = (result.stdout or result.stderr or "").strip()
+        match = re.search(r"Xray\s+(\d+)\.(\d+)\.(\d+)", output)
+        if not match:
+            return None
+        return tuple(int(group) for group in match.groups())
 
     def _ensure_geo_data_files(self, *, download_missing_only: bool = False) -> None:
         for target, url in (

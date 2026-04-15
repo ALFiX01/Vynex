@@ -32,12 +32,11 @@ if __package__ in {None, ""}:
         GEOIP_PATH,
         GEOSITE_PATH,
         LOGO_FILE,
-        SINGBOX_EXECUTABLE,
         SUBSCRIPTION_TITLE_BY_HOST,
         XRAY_EXECUTABLE,
     )
     from vynex_vpn_client.healthcheck import HealthcheckResult, XrayHealthChecker
-    from vynex_vpn_client.core import SingboxInstaller, XrayInstaller
+    from vynex_vpn_client.core import XrayInstaller
     from vynex_vpn_client.models import (
         AppSettings,
         LocalProxyCredentials,
@@ -48,17 +47,22 @@ if __package__ in {None, ""}:
         utc_now_iso,
     )
     from vynex_vpn_client.parsers import is_supported_share_link, parse_server_entries, parse_share_link
-    from vynex_vpn_client.process_manager import State as XrayState, SingboxProcessManager, XrayProcessManager
+    from vynex_vpn_client.process_manager import State as XrayState, XrayProcessManager
     from vynex_vpn_client.routing_profiles import RoutingProfileManager
-    from vynex_vpn_client.singbox_config_builder import SingboxConfigBuilder
     from vynex_vpn_client.storage import JsonStorage
     from vynex_vpn_client.subscriptions import SubscriptionManager
     from vynex_vpn_client.system_proxy import SystemProxyState, WindowsSystemProxyManager
     from vynex_vpn_client.utils import (
+        WindowsInterfaceDetails,
+        add_ipv4_route,
         clamp_port,
         generate_random_password,
         generate_random_username,
+        get_active_ipv4_interface,
+        get_interface_details,
+        is_running_as_admin,
         pick_random_port,
+        remove_ipv4_route,
         wait_for_port_listener,
         wait_for_tun_interface,
     )
@@ -72,12 +76,11 @@ else:
         GEOIP_PATH,
         GEOSITE_PATH,
         LOGO_FILE,
-        SINGBOX_EXECUTABLE,
         SUBSCRIPTION_TITLE_BY_HOST,
         XRAY_EXECUTABLE,
     )
     from .healthcheck import HealthcheckResult, XrayHealthChecker
-    from .core import SingboxInstaller, XrayInstaller
+    from .core import XrayInstaller
     from .models import (
         AppSettings,
         LocalProxyCredentials,
@@ -88,17 +91,22 @@ else:
         utc_now_iso,
     )
     from .parsers import is_supported_share_link, parse_server_entries, parse_share_link
-    from .process_manager import State as XrayState, SingboxProcessManager, XrayProcessManager
+    from .process_manager import State as XrayState, XrayProcessManager
     from .routing_profiles import RoutingProfileManager
-    from .singbox_config_builder import SingboxConfigBuilder
     from .storage import JsonStorage
     from .subscriptions import SubscriptionManager
     from .system_proxy import SystemProxyState, WindowsSystemProxyManager
     from .utils import (
+        WindowsInterfaceDetails,
+        add_ipv4_route,
         clamp_port,
         generate_random_password,
         generate_random_username,
+        get_active_ipv4_interface,
+        get_interface_details,
+        is_running_as_admin,
         pick_random_port,
+        remove_ipv4_route,
         wait_for_port_listener,
         wait_for_tun_interface,
     )
@@ -117,15 +125,12 @@ class VynexVpnApp:
         self.console = Console()
         self.storage = JsonStorage()
         self.installer = XrayInstaller()
-        self.singbox_installer = SingboxInstaller()
         self.app_update_checker = AppUpdateChecker()
         self.app_updater = AppSelfUpdater()
         self.subscription_manager = SubscriptionManager(self.storage)
         self.routing_profiles = RoutingProfileManager()
         self.config_builder = XrayConfigBuilder()
-        self.singbox_config_builder = SingboxConfigBuilder()
         self.process_manager = XrayProcessManager(on_crash_callback=self._handle_xray_crash)
-        self.singbox_process_manager = SingboxProcessManager()
         self.health_checker = XrayHealthChecker()
         self.system_proxy_manager = WindowsSystemProxyManager()
         self.app_release_info: AppReleaseInfo | None = self.app_update_checker.get_cached_release(max_age_seconds=None)
@@ -158,26 +163,13 @@ class VynexVpnApp:
             self._shutdown()
 
     def _ensure_xray_ready(self) -> None:
-        settings = self._validated_settings(raise_on_error=False)
-        if settings.connection_mode == "TUN":
-            try:
-                self.singbox_installer.ensure_singbox()
-            except Exception as exc:  # noqa: BLE001
-                self.console.print(
-                    Panel.fit(
-                        f"{exc}\n\nTUN режим может быть недоступен, но приложение продолжит работу.",
-                        title="Предупреждение sing-box",
-                        border_style="yellow",
-                    )
-                )
-            return
         try:
             self.installer.ensure_xray()
         except Exception as exc:  # noqa: BLE001
             self.console.print(
                 Panel.fit(
-                    f"{exc}\n\nPROXY режим может быть недоступен, но приложение продолжит работу.",
-                    title="Предупреждение Xray-core",
+                    f"{exc}\n\nПодключение через Xray может быть недоступно, но приложение продолжит работу.",
+                    title="Предупреждение runtime",
                     border_style="yellow",
                 )
             )
@@ -389,8 +381,8 @@ class VynexVpnApp:
         settings = self._validated_settings()
         mode = settings.connection_mode
         selected_server = next(server for server in servers if server.id == selected_server_id)
-        routing_profile = self._get_active_routing_profile() if mode != "TUN" else None
-        if mode != "TUN" and routing_profile is None:
+        routing_profile = self._get_active_routing_profile()
+        if routing_profile is None:
             self._render_screen()
             self.console.print(
                 Panel.fit(
@@ -401,13 +393,16 @@ class VynexVpnApp:
             )
             self._pause()
             return
-        routing_label = routing_profile.name if routing_profile is not None else "Встроенный TUN"
+        routing_label = routing_profile.name
         proxy_session: ProxyRuntimeSession | None = None
+        manager = self._process_manager_for_mode(mode)
         pid: int | None = None
         helper_pid: int | None = None
         use_system_proxy = False
         system_proxy_applied = False
         previous_system_proxy: SystemProxyState | None = None
+        outbound_interface: WindowsInterfaceDetails | None = None
+        tun_interface: WindowsInterfaceDetails | None = None
         try:
             self._show_connection_progress(
                 self._ui_server_name(selected_server.name),
@@ -415,15 +410,24 @@ class VynexVpnApp:
                 "Подготовка параметров подключения...",
             )
             self._ensure_runtime_ready(mode)
+            if mode == "TUN":
+                self._show_connection_progress(
+                    self._ui_server_name(selected_server.name),
+                    routing_label,
+                    "Проверка требований TUN...",
+                )
+                outbound_interface = self._prepare_tun_prerequisites()
             self._disconnect_runtime(silent=True)
-            manager = self._process_manager_for_mode(mode)
             manager.ensure_no_running_instances()
             use_system_proxy = mode == "PROXY" and settings.set_system_proxy
             if use_system_proxy:
                 previous_system_proxy = self.system_proxy_manager.snapshot()
             if mode == "TUN":
-                config = self.singbox_config_builder.build_tun(
+                config = self.config_builder.build(
                     server=selected_server,
+                    mode=mode,
+                    routing_profile=routing_profile,
+                    outbound_interface_name=outbound_interface.alias if outbound_interface else None,
                 )
             else:
                 proxy_session = self._build_runtime_proxy_session()
@@ -447,7 +451,13 @@ class VynexVpnApp:
                 "Ожидание готовности ядра подключения...",
             )
             if mode == "TUN":
-                self._wait_for_tun_ready(pid=pid)
+                tun_interface = self._wait_for_tun_ready(pid=pid)
+                self._show_connection_progress(
+                    self._ui_server_name(selected_server.name),
+                    routing_label,
+                    "Настройка маршрутов Windows...",
+                )
+                self._apply_tun_routes(tun_interface)
             elif proxy_session is not None:
                 self._wait_for_local_proxy_ready(pid=pid, proxy_session=proxy_session, mode=mode)
             self._show_connection_progress(
@@ -455,15 +465,17 @@ class VynexVpnApp:
                 routing_label,
                 " Проверка доступности сети...",
             )
+            health_warning: str | None = None
             health_result = self._run_healthcheck(
                 mode=mode,
                 http_port=proxy_session.http_port if proxy_session is not None else None,
             )
             if not health_result.ok:
-                manager.stop(pid)
-                raise RuntimeError(
-                    "Ядро запущено, но health-check не прошел.\n"
-                    f"Детали: {health_result.message}"
+                health_warning = self._handle_failed_healthcheck(
+                    mode=mode,
+                    pid=pid,
+                    manager=manager,
+                    health_result=health_result,
                 )
             if mode == "PROXY" and use_system_proxy:
                 if proxy_session.http_port is None:
@@ -483,8 +495,13 @@ class VynexVpnApp:
                 started_at=utc_now_iso(),
                 system_proxy_enabled=use_system_proxy,
                 previous_system_proxy=previous_system_proxy.to_dict() if previous_system_proxy else None,
-                routing_profile_id=routing_profile.profile_id if routing_profile is not None else None,
+                routing_profile_id=routing_profile.profile_id,
                 routing_profile_name=routing_label,
+                tun_interface_name=tun_interface.alias if tun_interface else None,
+                tun_interface_index=tun_interface.index if tun_interface else None,
+                tun_interface_ipv4=tun_interface.ipv4 if tun_interface else None,
+                tun_route_prefixes=list(self.config_builder.TUN_ROUTE_PREFIXES) if mode == "TUN" else [],
+                outbound_interface_name=outbound_interface.alias if outbound_interface else None,
             )
             self.storage.save_runtime_state(state)
             self._proxy_session = proxy_session
@@ -497,27 +514,44 @@ class VynexVpnApp:
                 ("Системный proxy", "включен" if use_system_proxy else "не используется"),
             ]
             if mode == "TUN":
-                detail_rows.append(("Ядро", "sing-box"))
-                detail_rows.append(("TUN", "авто-маршрутизация включена, используется отдельный конфиг"))
-                detail_rows.append(("DNS", "bootstrap 1.1.1.1, proxy DNS через outbound proxy"))
+                detail_rows.append(("Ядро", "xray"))
+                if tun_interface is not None:
+                    detail_rows.append(("TUN интерфейс", f"{tun_interface.alias} ({tun_interface.ipv4 or 'IPv4 не определен'})"))
+                if outbound_interface is not None:
+                    detail_rows.append(("Внешний интерфейс", outbound_interface.alias))
+                detail_rows.append(("Маршруты", ", ".join(self.config_builder.TUN_ROUTE_PREFIXES)))
+                detail_rows.append(("IPv6", "может обходить TUN, если на системе активен IPv6"))
             else:
                 detail_rows.append(("Ядро", "xray"))
                 detail_rows.append(("Локальный SOCKS5", "включен, учетные данные только в памяти"))
                 detail_rows.append(("Локальный HTTP", "включен на случайном порту текущей сессии"))
             if health_result.checked_url:
                 detail_rows.append(("Health-check", health_result.checked_url))
+            elif health_warning is not None:
+                detail_rows.append(("Health-check", "не подтвержден, соединение оставлено активным"))
             self._render_screen()
             self.console.print(
                 Panel.fit(
                     self._key_value_group(detail_rows),
-                    title="Подключение установлено",
-                    border_style="green",
+                    title="Подключение установлено с предупреждением" if health_warning else "Подключение установлено",
+                    border_style="yellow" if health_warning else "green",
                 )
             )
+            if health_warning is not None:
+                self._runtime_notice = health_warning
             self._pause()
         except Exception as exc:  # noqa: BLE001
+            if mode == "TUN":
+                self._cleanup_tun_routes(
+                    RuntimeState(
+                        mode="TUN",
+                        tun_interface_index=tun_interface.index if tun_interface else None,
+                        tun_interface_ipv4=tun_interface.ipv4 if tun_interface else None,
+                        tun_route_prefixes=list(self.config_builder.TUN_ROUTE_PREFIXES),
+                    )
+                )
             if pid:
-                self._process_manager_for_mode(mode).stop(pid)
+                manager.stop(pid)
             if helper_pid:
                 self.process_manager.stop(helper_pid)
             if system_proxy_applied:
@@ -1039,7 +1073,7 @@ class VynexVpnApp:
                 "Настройки",
                 choices=[
                     f"Режим подключения: {self._connection_mode_label(settings.connection_mode)}",
-                    "Системный proxy: Вкл" if settings.set_system_proxy else "Системный proxy: Выкл",
+                    "Системный proxy (PROXY): Вкл" if settings.set_system_proxy else "Системный proxy (PROXY): Выкл",
                     f"Набор маршрутизации: {active_routing_name}",
                     "Сбросить системный proxy",
                     "Назад",
@@ -1054,7 +1088,7 @@ class VynexVpnApp:
                         "Выберите режим подключения",
                         choices=[
                             Choice(title="PROXY (xray)", value="PROXY"),
-                            Choice(title="TUN (test, sing-box)", value="TUN"),
+                            Choice(title="TUN (xray)", value="TUN"),
                         ],
                         use_shortcuts=True,
                     ).ask()
@@ -1063,7 +1097,7 @@ class VynexVpnApp:
                     settings.connection_mode = selected_mode
                     self.storage.save_settings(settings)
                     self._show_settings_saved(settings)
-                elif selected_action.startswith("Системный proxy:"):
+                elif selected_action.startswith("Системный proxy (PROXY):"):
                     system_proxy_answer = questionary.confirm(
                         "Устанавливать Proxy как системный proxy Windows при подключении?",
                         default=settings.set_system_proxy,
@@ -1091,7 +1125,6 @@ class VynexVpnApp:
                 "Компоненты",
                 choices=[
                     self._component_choice_label("Xray-core", XRAY_EXECUTABLE),
-                    self._component_choice_label("sing-box", SINGBOX_EXECUTABLE),
                     self._component_choice_label("geoip.dat", GEOIP_PATH),
                     self._component_choice_label("geosite.dat", GEOSITE_PATH),
                     self._routing_profiles_component_label(),
@@ -1107,10 +1140,6 @@ class VynexVpnApp:
                     self._prepare_component_update()
                     path = self.installer.update_xray()
                     self._show_component_result("Xray-core обновлен", path.name)
-                elif selected_action.startswith("sing-box"):
-                    self._prepare_component_update()
-                    path = self.singbox_installer.update_singbox()
-                    self._show_component_result("sing-box обновлен", path.name)
                 elif selected_action.startswith("geoip.dat"):
                     self._prepare_component_update()
                     path = self.installer.update_geoip()
@@ -1128,7 +1157,6 @@ class VynexVpnApp:
                 elif selected_action == "Обновить все компоненты":
                     self._prepare_component_update()
                     result = self.installer.update_all_components()
-                    result["sing-box.exe"] = self.singbox_installer.update_singbox()
                     profiles = self.routing_profiles.update_profiles()
                     updated_components = list(result.keys())
                     updated_components.append(f"routing_profiles ({len(profiles)})")
@@ -1229,7 +1257,7 @@ class VynexVpnApp:
         settings = self._validated_settings(raise_on_error=False)
         if not state.is_running:
             default_mode = settings.connection_mode
-            engine_name = "xray" if default_mode == "PROXY" else "sing-box"
+            engine_name = "xray"
             engine_state_label = self._runtime_engine_state_label(RuntimeState(mode=default_mode))
             table = Table(show_header=False, box=None)
             table.add_row("Версия", f"v{APP_VERSION}")
@@ -1248,8 +1276,10 @@ class VynexVpnApp:
             )
             table.add_row(
                 "Маршрут",
-                self._active_routing_profile_name() if settings.connection_mode == "PROXY" else "встроенный TUN-конфиг",
+                self._active_routing_profile_name(),
             )
+            if settings.connection_mode == "TUN":
+                table.add_row("TUN", "нужны права администратора, маршруты IPv4 ставятся автоматически")
             self._render_screen()
             self.console.print(
                 Panel.fit(
@@ -1280,10 +1310,12 @@ class VynexVpnApp:
             table.add_row("SOCKS5", "защищен аутентификацией и не публикуется")
             table.add_row("Системный proxy", "Да" if state.system_proxy_enabled else "Нет")
         elif state.mode == "TUN":
-            table.add_row("Ядро", "sing-box")
-            table.add_row("Состояние sing-box", self._runtime_engine_state_label(state))
-            table.add_row("TUN", "экспериментальный режим активен")
-            table.add_row("Конфиг", "отдельный TUN-конфиг")
+            table.add_row("Ядро", "xray")
+            table.add_row("Состояние xray", self._runtime_engine_state_label(state))
+            table.add_row("TUN", state.tun_interface_name or self.config_builder.TUN_INTERFACE_NAME)
+            table.add_row("IPv4 TUN", state.tun_interface_ipv4 or "-")
+            table.add_row("Маршруты", ", ".join(state.tun_route_prefixes) if state.tun_route_prefixes else "-")
+            table.add_row("Внешний интерфейс", state.outbound_interface_name or "-")
             table.add_row("Системный proxy", "Нет")
         self._render_screen()
         self.console.print(Panel.fit(table, title="Статус подключения", border_style="cyan"))
@@ -1304,7 +1336,7 @@ class VynexVpnApp:
         manager = self._process_manager_for_mode(state.mode)
         main_dead = bool(
             state.pid
-            and not self._proxy_runtime_recovery_active(state)
+            and not self._xray_runtime_recovery_active(state)
             and not manager.is_running(state.pid)
         )
         helper_dead = bool(state.helper_pid and not self.process_manager.is_running(state.helper_pid))
@@ -1365,6 +1397,8 @@ class VynexVpnApp:
 
     def _disconnect_runtime(self, *, silent: bool = False) -> None:
         state = self.storage.load_runtime_state()
+        if str(state.mode or "").upper() == "TUN":
+            self._cleanup_tun_routes(state)
         if state.pid:
             self._process_manager_for_mode(state.mode).stop(state.pid)
         if state.helper_pid:
@@ -1387,6 +1421,27 @@ class VynexVpnApp:
             raise RuntimeError(f"Для режима {mode} не определен HTTP порт health-check.")
         return self.health_checker.verify_proxy(http_port=http_port)
 
+    @staticmethod
+    def _handle_failed_healthcheck(
+        *,
+        mode: str,
+        pid: int,
+        manager,
+        health_result: HealthcheckResult,
+    ) -> str | None:
+        details = (
+            "Ядро запущено, но health-check не прошел.\n"
+            f"Детали: {health_result.message}"
+        )
+        if mode == "TUN":
+            return (
+                "TUN подключение поднято, но быстрый health-check не подтвердил доступ в сеть. "
+                "Подключение оставлено активным: проверьте реальный трафик вручную. "
+                f"Детали: {health_result.message}"
+            )
+        manager.stop(pid)
+        raise RuntimeError(details)
+
     def _restore_system_proxy(self, state: RuntimeState) -> None:
         if not state.system_proxy_enabled:
             return
@@ -1408,11 +1463,21 @@ class VynexVpnApp:
 
     def _handle_xray_crash(self) -> None:
         state = self.storage.load_runtime_state()
-        if str(state.mode or "").upper() != "PROXY":
+        mode = str(state.mode or "").upper()
+        if mode not in {"PROXY", "TUN"}:
             return
         self._proxy_session = None
-        self._restore_system_proxy(state)
+        if mode == "TUN":
+            self._cleanup_tun_routes(state)
+        else:
+            self._restore_system_proxy(state)
         self.storage.save_runtime_state(RuntimeState())
+        if mode == "TUN":
+            self._runtime_notice = (
+                "Xray завершился и не смог восстановиться автоматически. "
+                "TUN маршруты удалены, подключение сброшено."
+            )
+            return
         self._runtime_notice = (
             "Xray завершился и не смог восстановиться автоматически. "
             "Подключение сброшено, системный proxy возвращен в прежнее состояние."
@@ -1436,7 +1501,8 @@ class VynexVpnApp:
     def _banner_status_line(self) -> str:
         state = self._current_state()
         settings = self._validated_settings(raise_on_error=False)
-        routing_name = escape(self._shorten_text(self._active_routing_profile_name(), 28))
+        routing_source = state.routing_profile_name if state.is_running and state.routing_profile_name else self._active_routing_profile_name()
+        routing_name = escape(self._shorten_text(routing_source, 28))
         update_suffix = ""
         if self._available_app_update() is not None:
             update_suffix = f" | [bold yellow]Доступна новая версия:[/bold yellow] {escape(self._available_app_update_label())}"
@@ -1467,47 +1533,41 @@ class VynexVpnApp:
     def _runtime_status_markup(self, state: RuntimeState) -> str:
         if not state.is_running:
             return "[yellow]Не подключено[/yellow]"
-        if str(state.mode or "").upper() != "PROXY":
-            return "[green]Подключено[/green]"
-        proxy_state = self._proxy_engine_state(state)
-        if proxy_state == XrayState.STARTING:
+        xray_state = self._proxy_engine_state(state)
+        if xray_state == XrayState.STARTING:
             return "[cyan]Xray запускается[/cyan]"
-        if proxy_state == XrayState.CRASHED:
+        if xray_state == XrayState.CRASHED:
             return "[yellow]Xray восстанавливается[/yellow]"
-        if proxy_state == XrayState.STOPPING:
+        if xray_state == XrayState.STOPPING:
             return "[yellow]Подключение останавливается[/yellow]"
         return "[green]Подключено[/green]"
 
     def _runtime_status_text(self, state: RuntimeState) -> str:
         if not state.is_running:
             return "Не подключено"
-        if str(state.mode or "").upper() != "PROXY":
-            return "Запущен"
-        proxy_state = self._proxy_engine_state(state)
-        if proxy_state == XrayState.STARTING:
+        xray_state = self._proxy_engine_state(state)
+        if xray_state == XrayState.STARTING:
             return "Запуск Xray"
-        if proxy_state == XrayState.CRASHED:
+        if xray_state == XrayState.CRASHED:
             return "Восстановление Xray"
-        if proxy_state == XrayState.STOPPING:
+        if xray_state == XrayState.STOPPING:
             return "Остановка подключения"
         return "Запущен"
 
     def _runtime_engine_state_label(self, state: RuntimeState) -> str:
-        if str(state.mode or "").upper() == "PROXY":
-            proxy_state = self._proxy_engine_state(state)
-            if proxy_state == XrayState.STARTING:
-                return "Запускается"
-            if proxy_state == XrayState.RUNNING:
-                return "Работает"
-            if proxy_state == XrayState.STOPPING:
-                return "Останавливается"
-            if proxy_state == XrayState.CRASHED:
-                return "Сбой, идет восстановление"
-            return "Остановлено"
+        xray_state = self._proxy_engine_state(state)
+        if xray_state == XrayState.STARTING:
+            return "Запускается"
+        if xray_state == XrayState.RUNNING:
+            return "Работает"
+        if xray_state == XrayState.STOPPING:
+            return "Останавливается"
+        if xray_state == XrayState.CRASHED:
+            return "Сбой, идет восстановление"
         return "Работает" if state.is_running else "Остановлено"
 
     def _runtime_pid_label(self, state: RuntimeState) -> str:
-        if str(state.mode or "").upper() == "PROXY":
+        if str(state.mode or "").upper() in {"PROXY", "TUN"}:
             current_pid = self.process_manager.pid
             if current_pid is not None:
                 return str(current_pid)
@@ -1515,8 +1575,8 @@ class VynexVpnApp:
                 return "перезапуск"
         return str(state.pid) if state.pid is not None else "-"
 
-    def _proxy_runtime_recovery_active(self, state: RuntimeState) -> bool:
-        if str(state.mode or "").upper() != "PROXY" or not state.is_running:
+    def _xray_runtime_recovery_active(self, state: RuntimeState) -> bool:
+        if str(state.mode or "").upper() not in {"PROXY", "TUN"} or not state.is_running:
             return False
         return self._proxy_engine_state(state) in {XrayState.STARTING, XrayState.CRASHED, XrayState.STOPPING}
 
@@ -1695,6 +1755,42 @@ class VynexVpnApp:
         normalized = details.lower()
 
         if title == "Ошибка подключения":
+            if "от имени администратора" in normalized or "повышенными правами" in normalized:
+                return (
+                    "Для TUN режима клиент должен быть запущен с правами администратора.",
+                    [
+                        "Закройте приложение и запустите `VynexVPNClient.exe` через 'Запуск от имени администратора'.",
+                        "После перезапуска повторите подключение в режиме TUN.",
+                    ],
+                    details,
+                )
+            if "wintun.dll" in normalized:
+                return (
+                    "В runtime Xray отсутствует драйверный компонент `wintun.dll` для Windows TUN.",
+                    [
+                        "Откройте 'Компоненты' и обновите Xray-core.",
+                        "Если используете портативную сборку, проверьте, что антивирус не удалил `wintun.dll`.",
+                    ],
+                    details,
+                )
+            if "не поддерживает tun режим" in normalized:
+                return (
+                    "Текущая версия Xray-core слишком старая для TUN режима.",
+                    [
+                        "Откройте 'Компоненты' и обновите Xray-core до актуальной версии.",
+                        "После обновления повторите подключение.",
+                    ],
+                    details,
+                )
+            if "не удалось определить активный ipv4 интерфейс" in normalized:
+                return (
+                    "Клиент не нашел рабочий сетевой интерфейс Windows, через который Xray должен выходить в интернет.",
+                    [
+                        "Проверьте, что у системы есть активное подключение и default route.",
+                        "Если сеть только что переключалась, подождите несколько секунд и повторите попытку.",
+                    ],
+                    details,
+                )
             if "порт" in normalized and "занят" in normalized:
                 return (
                     "Локальный proxy-порт уже используется другим приложением.",
@@ -1711,6 +1807,24 @@ class VynexVpnApp:
                         "Попробуйте другой сервер из списка.",
                         "Если проблема повторяется, обновите 'Компоненты' и проверьте доступ в интернет.",
                         "При необходимости временно отключите системный proxy в 'Настройки' и попробуйте снова.",
+                    ],
+                    details,
+                )
+            if "не удалось добавить маршрут" in normalized:
+                return (
+                    "Xray поднял TUN интерфейс, но Windows не приняла маршруты для перехвата трафика.",
+                    [
+                        "Убедитесь, что приложение запущено от имени администратора.",
+                        "Проверьте, не блокирует ли изменение маршрутов другой VPN-клиент или корпоративная политика Windows.",
+                    ],
+                    details,
+                )
+            if "tun интерфейс" in normalized and ("ipv4" in normalized or "инициализации" in normalized):
+                return (
+                    "Xray не смог вовремя поднять TUN интерфейс Windows.",
+                    [
+                        "Проверьте, что в runtime присутствует `wintun.dll` и используется свежий Xray-core.",
+                        "Если в системе уже работает другой VPN/TUN-драйвер, временно отключите его и повторите попытку.",
                     ],
                     details,
                 )
@@ -2328,10 +2442,10 @@ class VynexVpnApp:
         )
         table.add_row(
             "Маршрутизация",
-            self._active_routing_profile_name() if settings.connection_mode == "PROXY" else "встроенный TUN-конфиг",
+            self._active_routing_profile_name(),
         )
         if settings.connection_mode == "TUN":
-            table.add_row("TUN", "используется sing-box")
+            table.add_row("TUN", "используется xray, требуется запуск от администратора")
 
         self._render_screen()
         self.console.print(
@@ -2374,7 +2488,7 @@ class VynexVpnApp:
         state = self._current_state()
         if not state.is_running:
             return
-        runtime_label = "sing-box" if str(state.mode or "").upper() == "TUN" else "Xray"
+        runtime_label = "Xray"
         should_disconnect = questionary.confirm(
             f"Сейчас запущен {runtime_label}. Остановить подключение для обновления компонента?",
             default=True,
@@ -2451,6 +2565,22 @@ class VynexVpnApp:
             ),
         )
 
+    def _prepare_tun_prerequisites(self) -> WindowsInterfaceDetails:
+        if not is_running_as_admin():
+            raise RuntimeError(
+                "TUN режим требует запуска приложения от имени администратора. "
+                "Перезапустите Vynex с повышенными правами."
+            )
+        outbound_interface = get_active_ipv4_interface(
+            exclude_aliases={self.config_builder.TUN_INTERFACE_NAME}
+        )
+        if outbound_interface is None:
+            raise RuntimeError(
+                "Не удалось определить активный IPv4 интерфейс Windows для TUN режима. "
+                "Проверьте, что сеть подключена и у системы есть рабочий default route."
+            )
+        return outbound_interface
+
     def _wait_for_local_proxy_ready(self, *, pid: int, proxy_session: ProxyRuntimeSession, mode: str) -> None:
         http_ready = wait_for_port_listener(proxy_session.http_port, timeout=12.0)
         socks_ready = wait_for_port_listener(proxy_session.socks_port, timeout=12.0)
@@ -2464,16 +2594,44 @@ class VynexVpnApp:
             )
         raise RuntimeError("Ядро не открыло локальные proxy-inbound вовремя.")
 
-    def _wait_for_tun_ready(self, *, pid: int) -> None:
-        if wait_for_tun_interface(self.singbox_config_builder.TUN_INTERFACE_NAME, timeout=12.0):
-            return
+    def _wait_for_tun_ready(self, *, pid: int) -> WindowsInterfaceDetails:
+        if wait_for_tun_interface(self.config_builder.TUN_INTERFACE_NAME, timeout=12.0):
+            details = get_interface_details(
+                self.config_builder.TUN_INTERFACE_NAME,
+                allow_link_local=True,
+            )
+            if details is not None and details.ipv4:
+                return details
         manager = self._process_manager_for_mode("TUN")
         if not manager.is_running(pid):
             raise RuntimeError(
                 "Ядро завершилось до инициализации TUN интерфейса.\n"
                 f"{manager.read_recent_output()}"
             )
-        raise RuntimeError("TUN интерфейс не был поднят вовремя.")
+        raise RuntimeError(
+            "TUN интерфейс был создан, но Windows не назначила ему IPv4 адрес вовремя."
+        )
+
+    def _apply_tun_routes(self, tun_interface: WindowsInterfaceDetails) -> None:
+        if tun_interface.ipv4 is None:
+            raise RuntimeError("Для TUN интерфейса не определен IPv4 адрес, маршруты не могут быть установлены.")
+        for prefix in self.config_builder.TUN_ROUTE_PREFIXES:
+            add_ipv4_route(
+                prefix,
+                interface_index=tun_interface.index,
+                next_hop=tun_interface.ipv4,
+                route_metric=1,
+            )
+
+    def _cleanup_tun_routes(self, state: RuntimeState) -> None:
+        if not state.tun_route_prefixes or state.tun_interface_index is None or state.tun_interface_ipv4 is None:
+            return
+        for prefix in state.tun_route_prefixes:
+            remove_ipv4_route(
+                prefix,
+                interface_index=state.tun_interface_index,
+                next_hop=state.tun_interface_ipv4,
+            )
 
     @staticmethod
     def _coerce_bool(value: object) -> bool:
@@ -2500,16 +2658,14 @@ class VynexVpnApp:
 
     @staticmethod
     def _connection_mode_label(value: str) -> str:
-        return "TUN (test, sing-box)" if str(value).upper() == "TUN" else "PROXY (xray)"
+        return "TUN (xray)" if str(value).upper() == "TUN" else "PROXY (xray)"
 
     def _process_manager_for_mode(self, mode: str | None):
-        if str(mode or "").upper() == "TUN":
-            return self.singbox_process_manager
         return self.process_manager
 
     def _ensure_runtime_ready(self, mode: str) -> None:
         if mode == "TUN":
-            self.singbox_installer.ensure_singbox()
+            self.installer.ensure_xray_tun_runtime()
             return
         self.installer.ensure_xray()
 

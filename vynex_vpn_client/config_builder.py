@@ -10,6 +10,10 @@ from .routing_profiles import RoutingProfile
 
 
 class XrayConfigBuilder:
+    TUN_INTERFACE_NAME = "VynexTun"
+    TUN_MTU = 1500
+    TUN_ROUTE_PREFIXES = ("0.0.0.0/1", "128.0.0.0/1")
+
     def build(
         self,
         *,
@@ -19,10 +23,17 @@ class XrayConfigBuilder:
         socks_port: int | None = None,
         http_port: int | None = None,
         socks_credentials: LocalProxyCredentials | None = None,
+        outbound_interface_name: str | None = None,
     ) -> dict[str, Any]:
         mode_upper = mode.upper()
+        if mode_upper == "TUN":
+            return self._build_tun_config(
+                server=server,
+                routing_profile=routing_profile,
+                outbound_interface_name=outbound_interface_name,
+            )
         if mode_upper != "PROXY":
-            raise ValueError("Поддерживается только Proxy режим.")
+            raise ValueError("Поддерживаются только Proxy и TUN режимы.")
         config: dict[str, Any] = {
             "log": {"loglevel": "warning"},
             "dns": self._dns_config(),
@@ -109,25 +120,95 @@ class XrayConfigBuilder:
             "rules": routing_profile.rules,
         }
 
-    def _build_outbound(self, server: ServerEntry) -> dict[str, Any]:
+    def _build_tun_config(
+        self,
+        *,
+        server: ServerEntry,
+        routing_profile: RoutingProfile,
+        outbound_interface_name: str | None,
+    ) -> dict[str, Any]:
+        if not outbound_interface_name:
+            raise ValueError("Для TUN режима не определен активный сетевой интерфейс Windows.")
+        return {
+            "log": {"loglevel": "warning"},
+            "dns": self._dns_config(),
+            "inbounds": [self._tun_inbound()],
+            "outbounds": [
+                self._build_outbound(server, outbound_interface_name=outbound_interface_name),
+                {"tag": "dns-out", "protocol": "dns"},
+                self._attach_outbound_interface(
+                    {"tag": "direct", "protocol": "freedom"},
+                    outbound_interface_name=outbound_interface_name,
+                ),
+                {"tag": "block", "protocol": "blackhole"},
+            ],
+            "routing": self._tun_routing_config(routing_profile),
+        }
+
+    @classmethod
+    def _tun_inbound(cls) -> dict[str, Any]:
+        return {
+            "tag": "tun-in",
+            "protocol": "tun",
+            "settings": {
+                "name": cls.TUN_INTERFACE_NAME,
+                "MTU": cls.TUN_MTU,
+            },
+            "sniffing": {
+                "enabled": True,
+                "destOverride": ["http", "tls", "quic"],
+            },
+        }
+
+    def _tun_routing_config(self, routing_profile: RoutingProfile) -> dict[str, Any]:
+        rules = [
+            {
+                "type": "field",
+                "process": ["self/", "xray/"],
+                "outboundTag": "direct",
+            },
+            *routing_profile.rules,
+            {
+                "type": "field",
+                "network": "tcp,udp",
+                "outboundTag": "proxy",
+            },
+        ]
+        return {
+            "domainStrategy": "IPIfNonMatch",
+            "rules": rules,
+        }
+
+    def _build_outbound(
+        self,
+        server: ServerEntry,
+        *,
+        outbound_interface_name: str | None = None,
+    ) -> dict[str, Any]:
         protocol = server.protocol.lower()
         if protocol == "vless":
-            return self._build_vless_outbound(server)
+            return self._build_vless_outbound(server, outbound_interface_name=outbound_interface_name)
         if protocol == "vmess":
-            return self._build_vmess_outbound(server)
+            return self._build_vmess_outbound(server, outbound_interface_name=outbound_interface_name)
         if protocol == "trojan":
-            return self._build_trojan_outbound(server)
+            return self._build_trojan_outbound(server, outbound_interface_name=outbound_interface_name)
         if protocol == "ss":
-            return self._build_shadowsocks_outbound(server)
+            return self._build_shadowsocks_outbound(server, outbound_interface_name=outbound_interface_name)
         raise ValueError(f"Неподдерживаемый протокол: {server.protocol}")
 
-    def _build_vless_outbound(self, server: ServerEntry) -> dict[str, Any]:
+    def _build_vless_outbound(
+        self,
+        server: ServerEntry,
+        *,
+        outbound_interface_name: str | None = None,
+    ) -> dict[str, Any]:
         extra = server.extra
         stream_settings = self._build_stream_settings(
             network=extra.get("network", "tcp"),
             security=extra.get("security", "none"),
             server=server,
             extra=extra,
+            outbound_interface_name=outbound_interface_name,
         )
         user = {
             "id": extra["id"],
@@ -150,7 +231,12 @@ class XrayConfigBuilder:
             "streamSettings": stream_settings,
         }
 
-    def _build_vmess_outbound(self, server: ServerEntry) -> dict[str, Any]:
+    def _build_vmess_outbound(
+        self,
+        server: ServerEntry,
+        *,
+        outbound_interface_name: str | None = None,
+    ) -> dict[str, Any]:
         extra = server.extra
         tls_mode = "tls" if str(extra.get("tls", "")).lower() == "tls" else "none"
         stream_settings = self._build_stream_settings(
@@ -158,6 +244,7 @@ class XrayConfigBuilder:
             security=tls_mode,
             server=server,
             extra=extra,
+            outbound_interface_name=outbound_interface_name,
         )
         return {
             "tag": "proxy",
@@ -180,7 +267,12 @@ class XrayConfigBuilder:
             "streamSettings": stream_settings,
         }
 
-    def _build_trojan_outbound(self, server: ServerEntry) -> dict[str, Any]:
+    def _build_trojan_outbound(
+        self,
+        server: ServerEntry,
+        *,
+        outbound_interface_name: str | None = None,
+    ) -> dict[str, Any]:
         extra = server.extra
         if not extra.get("password"):
             raise ValueError("Для Trojan требуется пароль.")
@@ -189,6 +281,7 @@ class XrayConfigBuilder:
             security=extra.get("security", "tls"),
             server=server,
             extra=extra,
+            outbound_interface_name=outbound_interface_name,
         )
         return {
             "tag": "proxy",
@@ -205,10 +298,14 @@ class XrayConfigBuilder:
             "streamSettings": stream_settings,
         }
 
-    @staticmethod
-    def _build_shadowsocks_outbound(server: ServerEntry) -> dict[str, Any]:
+    def _build_shadowsocks_outbound(
+        self,
+        server: ServerEntry,
+        *,
+        outbound_interface_name: str | None = None,
+    ) -> dict[str, Any]:
         extra = server.extra
-        return {
+        outbound = {
             "tag": "proxy",
             "protocol": "shadowsocks",
             "settings": {
@@ -222,6 +319,10 @@ class XrayConfigBuilder:
                 ]
             },
         }
+        return self._attach_outbound_interface(
+            outbound,
+            outbound_interface_name=outbound_interface_name,
+        )
 
     def _build_stream_settings(
         self,
@@ -230,6 +331,7 @@ class XrayConfigBuilder:
         security: str,
         server: ServerEntry,
         extra: dict[str, Any],
+        outbound_interface_name: str | None = None,
     ) -> dict[str, Any]:
         normalized_network = (network or "tcp").lower()
         normalized_security = (security or "none").lower()
@@ -273,4 +375,21 @@ class XrayConfigBuilder:
             stream_settings["grpcSettings"] = grpc_settings
         elif normalized_network == "tcp" and extra.get("header_type") and extra["header_type"] != "none":
             stream_settings["tcpSettings"] = {"header": {"type": extra["header_type"]}}
+        if outbound_interface_name:
+            stream_settings["sockopt"] = {"interface": outbound_interface_name}
         return stream_settings
+
+    @staticmethod
+    def _attach_outbound_interface(
+        outbound: dict[str, Any],
+        *,
+        outbound_interface_name: str | None,
+    ) -> dict[str, Any]:
+        if not outbound_interface_name:
+            return outbound
+        stream_settings = dict(outbound.get("streamSettings") or {})
+        sockopt = dict(stream_settings.get("sockopt") or {})
+        sockopt["interface"] = outbound_interface_name
+        stream_settings["sockopt"] = sockopt
+        outbound["streamSettings"] = stream_settings
+        return outbound
