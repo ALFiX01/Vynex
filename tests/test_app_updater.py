@@ -101,8 +101,9 @@ def test_generate_helper_script_includes_expected_paths_and_commands(tmp_path: P
 
     assert 'set "CURRENT_PID=4321"' in script
     assert f'set "TARGET_EXE={current_executable.resolve()}"' in script
+    assert f'set "TARGET_DIR={current_executable.resolve().parent}"' in script
     assert f'set "STAGED_EXE={staged_executable.resolve()}"' in script
     assert 'move /Y "%TARGET_EXE%" "%BACKUP_EXE%"' in script
     assert 'move /Y "%STAGED_EXE%" "%TARGET_EXE%"' in script
-    assert 'start "" "%TARGET_EXE%"' in script
+    assert 'start "" /D "%TARGET_DIR%" "%TARGET_EXE%"' in script
     assert 'call :restore_backup' in script

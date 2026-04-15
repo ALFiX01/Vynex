@@ -210,6 +210,7 @@ class AppSelfUpdater:
         values = {
             "current_pid": str(plan.current_pid),
             "target": self._escape_batch_value(plan.current_executable),
+            "target_dir": self._escape_batch_value(plan.current_executable.parent),
             "staged": self._escape_batch_value(plan.staged_executable),
             "backup": self._escape_batch_value(plan.backup_executable),
             "script": self._escape_batch_value(plan.helper_script),
@@ -221,6 +222,7 @@ chcp 65001>nul
 setlocal EnableExtensions
 set "CURRENT_PID={current_pid}"
 set "TARGET_EXE={target}"
+set "TARGET_DIR={target_dir}"
 set "STAGED_EXE={staged}"
 set "BACKUP_EXE={backup}"
 set "SCRIPT_PATH={script}"
@@ -236,7 +238,7 @@ if errorlevel 1 goto :fail
 call :replace_executable
 if errorlevel 1 goto :fail
 
-start "" "%TARGET_EXE%"
+start "" /D "%TARGET_DIR%" "%TARGET_EXE%"
 if errorlevel 1 (
   call :restore_backup
   goto :fail
