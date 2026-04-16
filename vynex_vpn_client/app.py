@@ -615,7 +615,7 @@ class VynexVpnApp:
             detail_rows = [
                 ("Сервер", self._ui_server_name(selected_server.name)),
                 ("Протокол", selected_server.protocol.upper()),
-                ("Режим", self._connection_mode_label(mode, backend_name=backend.engine_name)),
+                ("Режим", self._connection_mode_label(mode)),
                 ("Маршрутизация", routing_display_label),
                 ("PID", str(pid)),
                 ("Системный proxy", "включен" if use_system_proxy else "не используется"),
@@ -1224,8 +1224,8 @@ class VynexVpnApp:
                     selected_mode = self._select(
                         "Выберите режим подключения",
                         choices=[
-                            Choice(title="PROXY (xray)", value="PROXY"),
-                            Choice(title="TUN (xray)", value="TUN"),
+                            Choice(title="PROXY (Для браузера и приложений)", value="PROXY"),
+                            Choice(title="TUN (Для игр)", value="TUN"),
                         ],
                         use_shortcuts=True,
                     ).ask()
@@ -1591,6 +1591,12 @@ class VynexVpnApp:
         if mode == "TUN":
             return (
                 "TUN подключение поднято, но быстрый health-check не подтвердил доступ в сеть. "
+                "Подключение оставлено активным: проверьте реальный трафик вручную. "
+                f"Детали: {health_result.message}"
+            )
+        if mode == "PROXY" and health_result.inconclusive:
+            return (
+                "Локальный proxy поднят, но быстрый health-check не подтвердил внешний доступ. "
                 "Подключение оставлено активным: проверьте реальный трафик вручную. "
                 f"Детали: {health_result.message}"
             )
@@ -2467,15 +2473,16 @@ class VynexVpnApp:
         self._pause()
 
     def _servers_table(self, servers: list[ServerEntry], *, active_server_id: str | None) -> Table:
+        name_width = max(20, self.console.width - 80)
         table = Table(title="Серверы")
-        table.add_column("Имя", overflow="fold", max_width=max(20, self.console.width - 70))
+        table.add_column("Имя", no_wrap=True, overflow="ellipsis", max_width=name_width)
         table.add_column("Протокол", no_wrap=True)
         table.add_column("Адрес", no_wrap=True)
         table.add_column("Источник", no_wrap=True)
         table.add_column("Статус", no_wrap=True)
         for server in servers:
             table.add_row(
-                self._ui_server_name(server.name),
+                self._truncate_display_width(self._ui_server_name(server.name), name_width),
                 server.protocol.upper(),
                 f"{server.host}:{server.port}",
                 self._server_source_label(server),
@@ -2486,7 +2493,7 @@ class VynexVpnApp:
     def _server_manager_choice_title(self, server: ServerEntry, *, active_server_id: str | None) -> str:
         return self._truncate_display_width(
             self._ui_server_name(server.name),
-            max(18, self.console.width - 10),
+            max(18, self.console.width - 28),
         )
 
     def _server_details_panel(
@@ -2985,8 +2992,12 @@ class VynexVpnApp:
         raise ValueError("Некорректный режим подключения.")
 
     @staticmethod
-    def _connection_mode_label(value: str, *, backend_name: str = "xray") -> str:
-        return f"TUN ({backend_name})" if str(value).upper() == "TUN" else f"PROXY ({backend_name})"
+    def _connection_mode_label(value: str) -> str:
+        return (
+            "TUN (игры и весь трафик)"
+            if str(value).upper() == "TUN"
+            else "PROXY (браузер и приложения)"
+        )
 
     def _backend_by_id(self, backend_id: str | None) -> BaseVpnBackend | None:
         backends = getattr(self, "backends", None)

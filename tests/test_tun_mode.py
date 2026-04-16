@@ -143,7 +143,7 @@ def test_failed_healthcheck_in_proxy_mode_still_stops_runtime() -> None:
             mode="PROXY",
             pid=4321,
             manager=manager,
-            health_result=HealthcheckResult(ok=False, message="timeout"),
+            health_result=HealthcheckResult(ok=False, message="HTTP 502", inconclusive=False),
         )
     except RuntimeError as exc:
         assert "health-check не прошел" in str(exc)
@@ -151,3 +151,18 @@ def test_failed_healthcheck_in_proxy_mode_still_stops_runtime() -> None:
         raise AssertionError("Expected RuntimeError for failed proxy health-check")
 
     manager.stop.assert_called_once_with(4321)
+
+
+def test_failed_healthcheck_in_proxy_mode_timeout_becomes_warning() -> None:
+    manager = Mock()
+
+    warning = VynexVpnApp._handle_failed_healthcheck(
+        mode="PROXY",
+        pid=4321,
+        manager=manager,
+        health_result=HealthcheckResult(ok=False, message="timeout", inconclusive=True),
+    )
+
+    assert warning is not None
+    assert "подключение оставлено активным" in warning.lower()
+    manager.stop.assert_not_called()

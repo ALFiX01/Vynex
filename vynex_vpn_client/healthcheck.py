@@ -13,6 +13,7 @@ class HealthcheckResult:
     ok: bool
     message: str
     checked_url: str | None = None
+    inconclusive: bool = False
 
 
 class XrayHealthChecker:
@@ -71,6 +72,7 @@ class XrayHealthChecker:
         request_kwargs: dict,
     ) -> HealthcheckResult:
         errors: list[str] = []
+        all_failures_are_timeouts = True
         for attempt in range(1, attempts + 1):
             results = await asyncio.gather(
                 *[
@@ -83,16 +85,22 @@ class XrayHealthChecker:
                     for url in HEALTHCHECK_URLS
                 ]
             )
-            for ok, message, checked_url in results:
+            for ok, message, checked_url, is_timeout in results:
                 if ok:
                     return HealthcheckResult(ok=True, message=message, checked_url=checked_url)
                 errors.append(message)
+                if not is_timeout:
+                    all_failures_are_timeouts = False
             if attempt < attempts:
                 await asyncio.sleep(min(attempt, 2))
         message = " | ".join(errors[-3:]) if errors else "Сетевой запрос не был выполнен."
-        return HealthcheckResult(ok=False, message=message)
+        return HealthcheckResult(
+            ok=False,
+            message=message,
+            inconclusive=bool(errors) and all_failures_are_timeouts,
+        )
 
-    def _probe_url(self, url: str, timeout: int, request_kwargs: dict) -> tuple[bool, str, str | None]:
+    def _probe_url(self, url: str, timeout: int, request_kwargs: dict) -> tuple[bool, str, str | None, bool]:
         with requests.Session() as session:
             session.trust_env = False
             session.headers.update(self._headers)
@@ -104,7 +112,9 @@ class XrayHealthChecker:
                     **request_kwargs,
                 )
                 if response.ok:
-                    return True, f"Health-check успешен: {url}", url
-                return False, f"{url}: HTTP {response.status_code}", None
+                    return True, f"Health-check успешен: {url}", url, False
+                return False, f"{url}: HTTP {response.status_code}", None, False
+            except requests.Timeout as exc:
+                return False, f"{url}: {exc}", None, True
             except requests.RequestException as exc:
-                return False, f"{url}: {exc}", None
+                return False, f"{url}: {exc}", None, False
