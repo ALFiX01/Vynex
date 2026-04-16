@@ -91,7 +91,11 @@ class BaseVpnBackend(ABC):
         raise NotImplementedError
 
     def connection_mode_label(self, mode: str) -> str:
-        return f"{str(mode or '').upper()} ({self.engine_name})"
+        return (
+            "TUN (игры и весь трафик)"
+            if str(mode or "").upper() == "TUN"
+            else "PROXY (браузер и приложения)"
+        )
 
 
 class XrayBackend(BaseVpnBackend):

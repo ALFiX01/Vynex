@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from questionary import Choice
+from rich.console import Console
 
 from vynex_vpn_client.app import VynexVpnApp
 from vynex_vpn_client.backends import BaseVpnBackend
@@ -13,6 +14,7 @@ from vynex_vpn_client.process_manager import State as XrayState
 
 def _make_app(*, runtime_state: RuntimeState, manager_state: XrayState, manager_pid: int | None = None) -> VynexVpnApp:
     app = object.__new__(VynexVpnApp)
+    app.console = Console(width=80, record=True)
     app.storage = Mock()
     app.storage.load_runtime_state.return_value = runtime_state
     app.storage.save_runtime_state = Mock()
@@ -132,6 +134,45 @@ def test_server_choice_title_uses_console_safe_name() -> None:
         title = app._server_choice_title("srv 🚀", "VMESS", "example.com:443", 20, 5)
 
     assert "[U+1F680]" in title
+
+
+def test_server_manager_choice_title_truncates_long_names() -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+    app.console = Console(width=50, record=True)
+    server = ServerEntry.new(
+        name="vmess ([RU] game)-tele1324690943_port12667-9.77TB",
+        protocol="vmess",
+        host="31.192.111.158",
+        port=12667,
+        raw_link="vmess://example",
+        extra={"id": "22222222-2222-2222-2222-222222222222"},
+    )
+
+    title = app._server_manager_choice_title(server, active_server_id=None)
+
+    assert title.endswith("...")
+    assert app._display_width(title) <= 27
+
+
+def test_servers_table_truncates_long_names_without_wrapping() -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+    app.console = Console(width=100, record=True)
+    server = ServerEntry.new(
+        name="vmess ([RU] game)-tele1324690943_port12667-9.77TB",
+        protocol="vmess",
+        host="31.192.111.158",
+        port=12667,
+        raw_link="vmess://example",
+        extra={"id": "33333333-3333-3333-3333-333333333333"},
+    )
+
+    table = app._servers_table([server], active_server_id=None)
+    name_cell = table.columns[0]._cells[0]
+
+    assert table.columns[0].no_wrap is True
+    assert table.columns[0].overflow == "ellipsis"
+    assert name_cell.endswith("...")
+    assert app._display_width(name_cell) <= 25
 
 
 def test_back_choice_value_resolves_choice_value_after_terminal_styling() -> None:
