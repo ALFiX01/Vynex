@@ -1,25 +1,17 @@
 {
   "profile_id": "default",
   "name": "Базовый",
-  "description": "Текущая логика: private IP и localhost идут напрямую.",
+  "description": "Локальный трафик напрямую, всё остальное через прокси.",
   "rules": [
     {
       "type": "field",
-      "ip": [
-        "geoip:private",
-        "127.0.0.0/8",
-        "10.0.0.0/8",
-        "172.16.0.0/12",
-        "192.168.0.0/16"
-      ],
+      "ip": ["geoip:private"],
       "outboundTag": "direct"
     },
     {
       "type": "field",
-      "domain": [
-        "localhost"
-      ],
-      "outboundTag": "direct"
+      "network": "tcp,udp",
+      "outboundTag": "proxy"
     }
   ]
 }
