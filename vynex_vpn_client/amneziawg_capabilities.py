@@ -27,7 +27,7 @@ AWG_COMPAT_UNMAPPED_FIELDS = "unmapped_fields_present"
 
 AWG_HEADER_FIELDS = ("h1", "h2", "h3", "h4")
 AWG_SIGNATURE_FIELDS = ("i1", "i2", "i3", "i4", "i5")
-AWG_LEGACY_EXTENSION_FIELDS = frozenset({"j1", "j2", "j3", "itime"})
+AWG_LEGACY_EXTENSION_FIELDS = ("j1", "j2", "j3", "itime")
 
 _HEADER_RANGE_RE = re.compile(r"^\s*(\d+)\s*-\s*(\d+)\s*$")
 _UINT32_MAX = (1 << 32) - 1
@@ -211,7 +211,7 @@ def validate_awg_obfuscation_fields(
     if legacy_fields and not capability_spec.supports_legacy_extension_fields:
         raise ValueError(
             "Параметры "
-            + ", ".join(sorted(legacy_fields))
+            + ", ".join(legacy_fields)
             + " несовместимы с AmneziaWG 2.0."
         )
 
@@ -268,7 +268,7 @@ def requires_runtime_not_implemented_error(
     if legacy_fields:
         return (
             "Текущий Windows runtime builder не умеет материализовать параметры "
-            + ", ".join(sorted(legacy_fields))
+            + ", ".join(legacy_fields)
             + f" для AmneziaWG {protocol_version}. Уберите эти поля или используйте backend, "
             "который явно поддерживает legacy-расширения."
         )
@@ -322,7 +322,7 @@ def _build_warnings(
     if legacy_fields:
         warnings.append(
             "Обнаружены legacy-параметры "
-            + ", ".join(sorted(legacy_fields))
+            + ", ".join(legacy_fields)
             + f" для AmneziaWG {protocol_version}."
         )
     if has_unmapped_fields:

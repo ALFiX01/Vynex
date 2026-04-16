@@ -92,6 +92,13 @@ if __package__ in {None, ""}:
         wait_for_port_listener,
         wait_for_tun_interface,
     )
+    from vynex_vpn_client.tcp_ping import (
+        TcpPingResult,
+        TcpPingService,
+        TCP_PING_UNSUPPORTED_ERROR,
+        is_tcp_ping_unsupported_result,
+        sort_tcp_ping_results,
+    )
 else:
     from .app_update import AppReleaseInfo, AppUpdateChecker
     from .app_updater import AppSelfUpdater
@@ -135,6 +142,13 @@ else:
     from .storage import JsonStorage
     from .subscriptions import SubscriptionManager
     from .system_proxy import SystemProxyState, WindowsSystemProxyManager
+    from .tcp_ping import (
+        TcpPingResult,
+        TcpPingService,
+        TCP_PING_UNSUPPORTED_ERROR,
+        is_tcp_ping_unsupported_result,
+        sort_tcp_ping_results,
+    )
     from .utils import (
         WindowsInterfaceDetails,
         add_ipv4_route,
@@ -151,6 +165,7 @@ else:
     )
 
 FLAG_EMOJI_PATTERN = re.compile(r"[\U0001F1E6-\U0001F1FF]{2}")
+MAX_SERVER_NAME_DISPLAY_WIDTH = 39
 
 
 @dataclass(frozen=True)
@@ -186,6 +201,7 @@ class VynexVpnApp:
             ),
         }
         self.health_checker = XrayHealthChecker()
+        self.tcp_ping_service = TcpPingService()
         self.system_proxy_manager = WindowsSystemProxyManager()
         self.app_release_info: AppReleaseInfo | None = self.app_update_checker.get_cached_release(max_age_seconds=None)
         self._app_update_thread: threading.Thread | None = None
@@ -305,8 +321,30 @@ class VynexVpnApp:
                 self._show_subscriptions_overview()
 
     def _show_servers_overview(self) -> None:
+        last_ping_signature: tuple[tuple[str, str, str, int], ...] | None = None
         while True:
-            servers = self._sorted_servers(self.storage.load_servers())
+            loaded_servers = self.storage.load_servers()
+            ping_signature = self._servers_tcp_ping_signature(loaded_servers)
+            if loaded_servers and ping_signature != last_ping_signature:
+                try:
+                    loaded_servers = self._refresh_servers_tcp_ping_cache(
+                        loaded_servers,
+                        status_message=(
+                            f"[bold cyan]Обновляем TCP ping в менеджере серверов "
+                            f"({len(loaded_servers)})...[/bold cyan]"
+                        ),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    last_ping_signature = ping_signature
+                    self._render_screen()
+                    self._show_error("TCP ping серверов", exc)
+                    self._pause()
+                    loaded_servers = self.storage.load_servers()
+                else:
+                    last_ping_signature = ping_signature
+            else:
+                last_ping_signature = ping_signature
+            servers = self._sorted_servers(loaded_servers)
             state = self._current_state()
             active_server_id = state.server_id if state.is_running else None
             self._render_screen()
@@ -328,6 +366,7 @@ class VynexVpnApp:
                         value=server.id,
                     )
                 )
+            choices.append(Choice(title="Обновить TCP ping", value="__tcp_ping_all__"))
             choices.append(Choice(title="Быстрый импорт: сервер / подписка", value="__add__"))
             choices.append(Choice(title="Назад", value="__back__"))
             selected_action = self._select(
@@ -337,10 +376,61 @@ class VynexVpnApp:
             ).ask()
             if selected_action in (None, "__back__"):
                 return
+            if selected_action == "__tcp_ping_all__":
+                current_servers = self.storage.load_servers()
+                if not current_servers:
+                    continue
+                try:
+                    self._refresh_servers_tcp_ping_cache(
+                        current_servers,
+                        status_message=f"[bold cyan]Обновляем TCP ping для {len(current_servers)} серверов...[/bold cyan]",
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self._render_screen()
+                    self._show_error("TCP ping серверов", exc)
+                    self._pause()
+                else:
+                    last_ping_signature = self._servers_tcp_ping_signature(current_servers)
+                continue
             if selected_action == "__add__":
                 self.add_server_flow()
                 continue
             self._server_details_flow(selected_action)
+
+    def tcp_ping_all_flow(self) -> None:
+        servers = self.storage.load_servers()
+        if not servers:
+            self._render_screen()
+            self.console.print(
+                Panel.fit(
+                    "Список серверов пуст. Добавьте хотя бы один сервер перед запуском TCP ping.",
+                    title="TCP ping серверов",
+                    border_style="yellow",
+                )
+            )
+            self._pause()
+            return
+
+        try:
+            self._render_screen()
+            with self.console.status(
+                f"[bold cyan]Проверяем TCP ping для {len(servers)} серверов...[/bold cyan]",
+                spinner="dots",
+            ):
+                results = self._tcp_ping_service_instance().ping_many(servers)
+        except Exception as exc:  # noqa: BLE001
+            self._render_screen()
+            self._show_error("TCP ping серверов", exc)
+            self._pause()
+            return
+
+        self._persist_tcp_ping_results(servers, results)
+        state = self._current_state()
+        active_server_id = state.server_id if state.is_running else None
+        self._render_screen()
+        self.console.print(self._tcp_ping_summary_panel(servers, results))
+        self.console.print(self._tcp_ping_results_table(servers, results, active_server_id=active_server_id))
+        self._pause()
 
     def _show_subscriptions_overview(self) -> None:
         while True:
@@ -767,7 +857,7 @@ class VynexVpnApp:
             self._pause()
             return
 
-        name_width = max((self._display_width(self._ui_server_name(server.name)) for server in servers), default=12)
+        name_width = self._server_name_column_width(servers)
         protocol_width = max((self._display_width(server.protocol.upper()) for server in servers), default=5)
         choices = [
             Choice(
@@ -2426,10 +2516,13 @@ class VynexVpnApp:
             return value[:limit]
         return f"{value[: limit - 3]}..."
 
+    def _server_name_display_width(self, *, min_width: int, reserved_width: int) -> int:
+        available_width = max(min_width, self.console.width - reserved_width)
+        return min(MAX_SERVER_NAME_DISPLAY_WIDTH, available_width)
+
     def _server_name_column_width(self, servers) -> int:
-        reserved_width = 24
         max_name_width = max((self._display_width(self._ui_server_name(server.name)) for server in servers), default=12)
-        available_width = max(18, self.console.width - reserved_width)
+        available_width = self._server_name_display_width(min_width=18, reserved_width=24)
         return min(max_name_width, available_width)
 
     def _server_choice_title(
@@ -2472,14 +2565,168 @@ class VynexVpnApp:
         self.console.print(Panel.fit(table, title=title, border_style="green"))
         self._pause()
 
+    def _tcp_ping_service_instance(self) -> TcpPingService:
+        service = getattr(self, "tcp_ping_service", None)
+        if service is None:
+            service = TcpPingService()
+            self.tcp_ping_service = service
+        return service
+
+    def _persist_tcp_ping_results(self, servers: list[ServerEntry], results: list[TcpPingResult]) -> None:
+        result_by_id = {result.server_id: result for result in results}
+        for server in servers:
+            result = result_by_id.get(server.id)
+            if result is None:
+                server.extra.pop("tcp_ping_ms", None)
+                server.extra.pop("tcp_ping_ok", None)
+                server.extra.pop("tcp_ping_error", None)
+                server.extra.pop("tcp_ping_checked_at", None)
+                continue
+            server.extra["tcp_ping_ms"] = result.latency_ms
+            server.extra["tcp_ping_ok"] = result.ok
+            server.extra["tcp_ping_error"] = result.error
+            server.extra["tcp_ping_checked_at"] = result.checked_at
+        self.storage.save_servers(servers)
+
+    def _refresh_servers_tcp_ping_cache(
+        self,
+        servers: list[ServerEntry],
+        *,
+        status_message: str | None = None,
+    ) -> list[ServerEntry]:
+        if not servers:
+            return servers
+        results = self._run_servers_tcp_ping(
+            servers,
+            status_message=(
+                status_message
+                or f"[bold cyan]Проверяем TCP ping для {len(servers)} серверов...[/bold cyan]"
+            ),
+        )
+        self._persist_tcp_ping_results(servers, results)
+        return servers
+
+    def _run_servers_tcp_ping(
+        self,
+        servers: list[ServerEntry],
+        *,
+        status_message: str,
+    ) -> list[TcpPingResult]:
+        self._render_screen()
+        with self.console.status(status_message, spinner="dots"):
+            return self._tcp_ping_service_instance().ping_many(servers)
+
+    @staticmethod
+    def _servers_tcp_ping_signature(servers: list[ServerEntry]) -> tuple[tuple[str, str, str, int], ...]:
+        return tuple(
+            sorted(
+                (
+                    server.id,
+                    server.protocol.lower(),
+                    server.host.lower(),
+                    server.port,
+                )
+                for server in servers
+            )
+        )
+
+    def _tcp_ping_summary_panel(self, servers: list[ServerEntry], results: list[TcpPingResult]) -> Panel:
+        ordered_results = sort_tcp_ping_results(servers, results)
+        available_results = [result for result in results if result.ok]
+        unsupported_results = [result for result in results if is_tcp_ping_unsupported_result(result)]
+        unavailable_results = [
+            result for result in results
+            if not result.ok and not is_tcp_ping_unsupported_result(result)
+        ]
+        best_entry = ordered_results[0] if ordered_results and ordered_results[0][1].ok else None
+        table = Table(show_header=False, box=None, pad_edge=False)
+        table.add_column("Параметр", no_wrap=True, style="bold")
+        table.add_column("Значение", overflow="fold", max_width=max(30, self.console.width - 32))
+        table.add_row("Всего", str(len(servers)))
+        table.add_row("Доступно", str(len(available_results)))
+        if unsupported_results:
+            table.add_row("Не проверяется", str(len(unsupported_results)))
+        table.add_row("Недоступно", str(len(unavailable_results)))
+        table.add_row(
+            "Лучший",
+            (
+                f"{self._ui_server_name(best_entry[0].name)} | {best_entry[1].latency_ms} ms"
+                if best_entry and best_entry[1].latency_ms is not None
+                else "-"
+            ),
+        )
+        if unsupported_results:
+            table.add_row("Примечание", "AMNEZIAWG использует UDP и не проверяется через TCP ping.")
+        return Panel.fit(
+            table,
+            title="TCP ping серверов",
+            border_style="cyan" if available_results else "yellow",
+        )
+
+    def _tcp_ping_results_table(
+        self,
+        servers: list[ServerEntry],
+        results: list[TcpPingResult],
+        *,
+        active_server_id: str | None,
+    ) -> Table:
+        ordered_results = sort_tcp_ping_results(servers, results)
+        best_server_id = ordered_results[0][0].id if ordered_results and ordered_results[0][1].ok else None
+        name_width = self._server_name_display_width(min_width=20, reserved_width=64)
+        table = Table(title="Результаты TCP ping")
+        table.add_column("Имя", no_wrap=True, overflow="ellipsis", max_width=name_width)
+        table.add_column("Протокол", no_wrap=True)
+        table.add_column("Адрес", no_wrap=True)
+        table.add_column("Статус", no_wrap=True)
+        table.add_column("TCP ping", no_wrap=True)
+        for server, result in ordered_results:
+            name = self._truncate_display_width(self._ui_server_name(server.name), name_width)
+            if server.id == active_server_id:
+                name = self._truncate_display_width(f"{name} [активен]", name_width)
+            table.add_row(
+                name,
+                server.protocol.upper(),
+                f"{server.host}:{server.port}",
+                self._tcp_ping_status_label(result),
+                self._tcp_ping_result_label(result),
+                style="bold green" if server.id == best_server_id else None,
+            )
+        return table
+
+    @staticmethod
+    def _tcp_ping_status_label(result: TcpPingResult) -> str:
+        if result.ok:
+            return "Доступен"
+        if is_tcp_ping_unsupported_result(result):
+            return "Не проверяется"
+        return "Недоступен"
+
+    @staticmethod
+    def _tcp_ping_result_label(result: TcpPingResult) -> str:
+        if result.ok and result.latency_ms is not None:
+            return f"{result.latency_ms} ms"
+        return VynexVpnApp._tcp_ping_error_label(result.error)
+
+    def _cached_tcp_ping_label(self, server: ServerEntry) -> str:
+        if server.extra.get("tcp_ping_ok") and server.extra.get("tcp_ping_ms") is not None:
+            return f"{server.extra['tcp_ping_ms']} ms"
+        return self._tcp_ping_error_label(server.extra.get("tcp_ping_error"))
+
+    @staticmethod
+    def _tcp_ping_error_label(error: object) -> str:
+        if str(error or "").strip() == TCP_PING_UNSUPPORTED_ERROR:
+            return "н/д"
+        return str(error or "-")
+
     def _servers_table(self, servers: list[ServerEntry], *, active_server_id: str | None) -> Table:
-        name_width = max(20, self.console.width - 80)
+        name_width = self._server_name_display_width(min_width=18, reserved_width=96)
         table = Table(title="Серверы")
         table.add_column("Имя", no_wrap=True, overflow="ellipsis", max_width=name_width)
         table.add_column("Протокол", no_wrap=True)
         table.add_column("Адрес", no_wrap=True)
         table.add_column("Источник", no_wrap=True)
         table.add_column("Статус", no_wrap=True)
+        table.add_column("TCP ping", no_wrap=True)
         for server in servers:
             table.add_row(
                 self._truncate_display_width(self._ui_server_name(server.name), name_width),
@@ -2487,13 +2734,14 @@ class VynexVpnApp:
                 f"{server.host}:{server.port}",
                 self._server_source_label(server),
                 self._server_status_label(server, active_server_id=active_server_id),
+                self._cached_tcp_ping_label(server),
             )
         return table
 
     def _server_manager_choice_title(self, server: ServerEntry, *, active_server_id: str | None) -> str:
         return self._truncate_display_width(
             self._ui_server_name(server.name),
-            max(18, self.console.width - 28),
+            self._server_name_display_width(min_width=18, reserved_width=28),
         )
 
     def _server_details_panel(
@@ -2513,6 +2761,9 @@ class VynexVpnApp:
         table.add_row("Источник", self._server_source_label(server))
         table.add_row("Статус", self._server_status_label(server, active_server_id=self._current_state().server_id))
         table.add_row("Создан", self._shorten_text(server.created_at, 19))
+        if "tcp_ping_checked_at" in server.extra:
+            table.add_row("TCP ping", self._cached_tcp_ping_label(server))
+            table.add_row("Проверено", self._shorten_text(str(server.extra.get("tcp_ping_checked_at") or "-"), 19))
         if parent_subscription is not None:
             table.add_row("Подписка", self._ui_subscription_title(parent_subscription.title))
         if server.source == "subscription":

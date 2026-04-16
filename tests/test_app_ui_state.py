@@ -6,10 +6,11 @@ from unittest.mock import Mock, patch
 from questionary import Choice
 from rich.console import Console
 
-from vynex_vpn_client.app import VynexVpnApp
+from vynex_vpn_client.app import MAX_SERVER_NAME_DISPLAY_WIDTH, VynexVpnApp
 from vynex_vpn_client.backends import BaseVpnBackend
 from vynex_vpn_client.models import AppSettings, RuntimeState, ServerEntry
 from vynex_vpn_client.process_manager import State as XrayState
+from vynex_vpn_client.tcp_ping import TCP_PING_UNSUPPORTED_ERROR, TcpPingResult
 
 
 def _make_app(*, runtime_state: RuntimeState, manager_state: XrayState, manager_pid: int | None = None) -> VynexVpnApp:
@@ -172,7 +173,65 @@ def test_servers_table_truncates_long_names_without_wrapping() -> None:
     assert table.columns[0].no_wrap is True
     assert table.columns[0].overflow == "ellipsis"
     assert name_cell.endswith("...")
-    assert app._display_width(name_cell) <= 25
+    assert app._display_width(name_cell) <= 18
+    assert table.columns[5]._cells[0] == "-"
+
+
+def test_server_name_column_width_caps_maximum_on_wide_console() -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+    app.console = Console(width=200, record=True)
+    server = ServerEntry.new(
+        name="server-" * 12,
+        protocol="vmess",
+        host="31.192.111.158",
+        port=12667,
+        raw_link="vmess://example",
+        extra={"id": "44444444-4444-4444-4444-444444444444"},
+    )
+
+    assert app._server_name_column_width([server]) == MAX_SERVER_NAME_DISPLAY_WIDTH
+
+
+def test_server_name_truncation_matches_expected_example() -> None:
+    value = "vmess ([RU] game)-tele1324690943_port12667-9.77TB"
+
+    assert VynexVpnApp._truncate_display_width(value, MAX_SERVER_NAME_DISPLAY_WIDTH) == "vmess ([RU] game)-tele1324690943_por..."
+
+
+def test_servers_table_caps_long_names_on_wide_console() -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+    app.console = Console(width=200, record=True)
+    server = ServerEntry.new(
+        name="server-" * 12,
+        protocol="vmess",
+        host="31.192.111.158",
+        port=12667,
+        raw_link="vmess://example",
+        extra={"id": "55555555-5555-5555-5555-555555555555"},
+    )
+
+    table = app._servers_table([server], active_server_id=None)
+    name_cell = table.columns[0]._cells[0]
+
+    assert name_cell.endswith("...")
+    assert app._display_width(name_cell) <= MAX_SERVER_NAME_DISPLAY_WIDTH
+
+
+def test_servers_table_shows_cached_tcp_ping_in_rightmost_column() -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+    server = ServerEntry.new(
+        name="Pinged",
+        protocol="vless",
+        host="example.com",
+        port=443,
+        raw_link="",
+        extra={"id": "pinged-id", "tcp_ping_ms": 24, "tcp_ping_ok": True},
+    )
+
+    table = app._servers_table([server], active_server_id=None)
+
+    assert table.columns[-1].header == "TCP ping"
+    assert table.columns[-1]._cells[0] == "24 ms"
 
 
 def test_back_choice_value_resolves_choice_value_after_terminal_styling() -> None:
@@ -183,3 +242,140 @@ def test_back_choice_value_resolves_choice_value_after_terminal_styling() -> Non
 
 def test_back_choice_value_returns_none_without_back_option() -> None:
     assert VynexVpnApp._back_choice_value(["Открыть", "Выход"]) is None
+
+
+def test_show_servers_overview_refreshes_tcp_ping_on_open() -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+    server = ServerEntry.new(
+        name="Open test",
+        protocol="vless",
+        host="example.com",
+        port=443,
+        raw_link="",
+        extra={"id": "open-id"},
+    )
+    app.storage.load_servers.return_value = [server]
+    app._render_screen = Mock()
+    app._current_state = Mock(return_value=RuntimeState())
+    app._refresh_servers_tcp_ping_cache = Mock(return_value=[server])
+    app._select = Mock(return_value=SimpleNamespace(ask=Mock(return_value="__back__")))
+    app.console.print = Mock()
+
+    app._show_servers_overview()
+
+    app._refresh_servers_tcp_ping_cache.assert_called_once()
+
+
+def test_tcp_ping_results_table_sorts_rows_and_formats_ping_values() -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+    fast = ServerEntry.new(
+        name="Fast",
+        protocol="vless",
+        host="fast.example.com",
+        port=443,
+        raw_link="",
+        extra={"id": "fast-id"},
+    )
+    active = ServerEntry.new(
+        name="Active",
+        protocol="vmess",
+        host="active.example.com",
+        port=8443,
+        raw_link="",
+        extra={"id": "active-id"},
+    )
+    awg = ServerEntry.new(
+        name="AWG",
+        protocol="amneziawg",
+        host="awg.example.com",
+        port=51820,
+        raw_link="",
+        extra={"id": "awg-id"},
+    )
+    down = ServerEntry.new(
+        name="Down",
+        protocol="trojan",
+        host="down.example.com",
+        port=443,
+        raw_link="",
+        extra={"id": "down-id"},
+    )
+
+    table = app._tcp_ping_results_table(
+        [active, awg, down, fast],
+        [
+            TcpPingResult(active.id, True, 45, None, "2026-04-16T00:00:00+00:00"),
+            TcpPingResult(awg.id, False, None, TCP_PING_UNSUPPORTED_ERROR, "2026-04-16T00:00:00+00:00"),
+            TcpPingResult(down.id, False, None, "timeout", "2026-04-16T00:00:01+00:00"),
+            TcpPingResult(fast.id, True, 18, None, "2026-04-16T00:00:02+00:00"),
+        ],
+        active_server_id=active.id,
+    )
+
+    assert table.columns[0]._cells[0] == "Fast"
+    assert table.columns[4]._cells[0] == "18 ms"
+    assert "[активен]" in table.columns[0]._cells[1]
+    assert table.columns[3]._cells[2] == "Не проверяется"
+    assert table.columns[4]._cells[2] == "н/д"
+    assert table.columns[3]._cells[3] == "Недоступен"
+
+
+def test_server_details_panel_shows_cached_tcp_ping() -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+    server = ServerEntry.new(
+        name="Cached",
+        protocol="vless",
+        host="cached.example.com",
+        port=443,
+        raw_link="",
+        extra={
+            "id": "cached-id",
+            "tcp_ping_ms": 42,
+            "tcp_ping_ok": True,
+            "tcp_ping_error": None,
+            "tcp_ping_checked_at": "2026-04-16T12:34:56+00:00",
+        },
+    )
+
+    panel = app._server_details_panel(server)
+    labels = panel.renderable.columns[0]._cells
+    values = panel.renderable.columns[1]._cells
+
+    assert "TCP ping" in labels
+    assert "Проверено" in labels
+    assert "42 ms" in values
+
+
+def test_tcp_ping_summary_panel_shows_udp_only_note_for_amneziawg() -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+    fast = ServerEntry.new(
+        name="Fast",
+        protocol="vless",
+        host="fast.example.com",
+        port=443,
+        raw_link="",
+        extra={"id": "fast-id"},
+    )
+    awg = ServerEntry.new(
+        name="AWG",
+        protocol="amneziawg",
+        host="awg.example.com",
+        port=51820,
+        raw_link="",
+        extra={"id": "awg-id"},
+    )
+
+    panel = app._tcp_ping_summary_panel(
+        [fast, awg],
+        [
+            TcpPingResult(fast.id, True, 18, None, "2026-04-16T00:00:00+00:00"),
+            TcpPingResult(awg.id, False, None, TCP_PING_UNSUPPORTED_ERROR, "2026-04-16T00:00:01+00:00"),
+        ],
+    )
+    labels = panel.renderable.columns[0]._cells
+    values = panel.renderable.columns[1]._cells
+
+    assert "Не проверяется" in labels
+    assert "Примечание" in labels
+    assert "1" in values
+    assert "AMNEZIAWG использует UDP" in values[-1]

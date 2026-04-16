@@ -5,7 +5,12 @@ import os
 import sys
 from pathlib import Path
 
-from vynex_vpn_client.constants import APP_NAME, APP_VERSION
+from vynex_vpn_client.constants import (
+    APP_NAME,
+    APP_VERSION,
+    DEFAULT_CONSOLE_COLUMNS,
+    DEFAULT_CONSOLE_LINES,
+)
 
 
 def _project_venv_python() -> Path | None:
@@ -74,6 +79,16 @@ def _set_console_title() -> None:
         pass
 
 
+def _set_console_window_size() -> None:
+    if sys.platform != "win32" or not sys.stdout.isatty():
+        return
+    try:
+        os.system(f"mode con cols={DEFAULT_CONSOLE_COLUMNS} lines={DEFAULT_CONSOLE_LINES} > nul")
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
+    _set_console_window_size()
     _set_console_title()
     raise SystemExit(main())
