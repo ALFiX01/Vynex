@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 APP_NAME = "Vynex VPN Client"
-APP_VERSION = "0.7.0"
+APP_VERSION = "0.7.1"
 APP_RELEASES_API = "https://api.github.com/repos/ALFiX01/Vynex/releases/latest"
 APP_RELEASES_PAGE = "https://github.com/ALFiX01/Vynex/releases/latest"
 APP_DIR = Path(__file__).resolve().parent.parent

@@ -26,10 +26,31 @@ SUPPORTED_SHARE_LINK_PREFIXES = (
 _BASE64_BODY_RE = re.compile(r"[A-Za-z0-9+/=\-_\n]+")
 _SINGBOX_SKIP_TYPES = {"direct", "block", "dns", "selector", "urltest"}
 _CLASH_SUPPORTED_TYPES = {"vless", "vmess", "trojan", "ss", "hy2", "hysteria2"}
+_PASTE_ARTIFACTS = "\ufeff\u200b\u200c\u200d\u2060\xa0"
+_PASTE_WRAPPERS = (
+    ("<", ">"),
+    ('"', '"'),
+    ("'", "'"),
+    ("“", "”"),
+    ("‘", "’"),
+)
+
+
+def _normalize_uri_candidate(value: str) -> str:
+    normalized = value.strip().strip(_PASTE_ARTIFACTS)
+    while normalized:
+        previous = normalized
+        for opener, closer in _PASTE_WRAPPERS:
+            if normalized.startswith(opener) and normalized.endswith(closer):
+                normalized = normalized[len(opener) : len(normalized) - len(closer)].strip().strip(_PASTE_ARTIFACTS)
+                break
+        if normalized == previous:
+            break
+    return normalized
 
 
 def is_supported_share_link(value: str) -> bool:
-    return value.strip().lower().startswith(SUPPORTED_SHARE_LINK_PREFIXES)
+    return _normalize_uri_candidate(value).lower().startswith(SUPPORTED_SHARE_LINK_PREFIXES)
 
 
 def extract_supported_share_links(payload: str) -> list[str]:
@@ -42,7 +63,7 @@ def parse_server_entries(
     source: str = "manual",
     subscription_id: str | None = None,
 ) -> list[ServerEntry]:
-    return _auto_parse(payload.strip(), source=source, subscription_id=subscription_id)
+    return _auto_parse(payload.strip().strip(_PASTE_ARTIFACTS), source=source, subscription_id=subscription_id)
 
 
 def parse_share_link(
@@ -52,7 +73,7 @@ def parse_share_link(
     subscription_id: str | None = None,
 ) -> ServerEntry:
     server = _parse_uri(
-        link.strip(),
+        _normalize_uri_candidate(link),
         source=source,
         subscription_id=subscription_id,
         silent=False,
@@ -121,7 +142,7 @@ def _parse_plain(
 ) -> list[ServerEntry]:
     servers: list[ServerEntry] = []
     for raw_line in text.splitlines():
-        line = raw_line.strip()
+        line = _normalize_uri_candidate(raw_line)
         if not line or line.startswith("#"):
             continue
         if is_vpn_uri(line):
@@ -148,7 +169,7 @@ def _parse_uri(
     subscription_id: str | None,
     silent: bool,
 ) -> ServerEntry | None:
-    normalized = uri.strip()
+    normalized = _normalize_uri_candidate(uri)
     lowered = normalized.lower()
     try:
         if lowered.startswith(("vless://", "trojan://", "hy2://", "hysteria2://")):

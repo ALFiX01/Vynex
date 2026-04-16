@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 from vynex_vpn_client.app import VynexVpnApp
 from vynex_vpn_client.models import ServerEntry, SubscriptionEntry
-from vynex_vpn_client.parsers import parse_server_entries
+from vynex_vpn_client.parsers import is_supported_share_link, parse_server_entries, parse_share_link
 from vynex_vpn_client.subscriptions import SubscriptionManager, merge_subscription_servers
 
 
@@ -78,6 +78,43 @@ def test_parse_server_entries_supports_clash_json() -> None:
     assert servers[0].extra["id"] == "id-1"
     assert servers[0].extra["sni"] == "sni.example.com"
     assert servers[1].extra["method"] == "aes-128-gcm"
+
+
+def test_parse_share_link_supports_reality_vless_with_emoji_fragment() -> None:
+    link = (
+        "vless://6ef40d01-fc7c-4ccf-ba96-bb659b92f6d8@185.80.91.169:443"
+        "?encryption=none&flow=xtls-rprx-vision&fp=chrome"
+        "&pbk=vZCRu2nZ7v7diSX2Zv7sOoFM2ESufvAyFwt0Bw9pJSc"
+        "&security=reality&sid=fc&sni=sosok.vk.com&spx=/&type=tcp"
+        "#tele1324690943_port443-9.77TB%F0%9F%93%8A"
+    )
+
+    server = parse_share_link(link)
+
+    assert server.protocol == "vless"
+    assert server.host == "185.80.91.169"
+    assert server.port == 443
+    assert server.name == "tele1324690943_port443-9.77TB📊"
+    assert server.extra["public_key"] == "vZCRu2nZ7v7diSX2Zv7sOoFM2ESufvAyFwt0Bw9pJSc"
+    assert server.extra["short_id"] == "fc"
+    assert server.extra["fingerprint"] == "chrome"
+    assert server.extra["spider_x"] == "/"
+
+
+def test_app_detects_share_link_with_common_paste_artifacts() -> None:
+    app = object.__new__(VynexVpnApp)
+    wrapped = '\ufeff<"vless://id-1@example.com:443?security=reality&pbk=KEY&sid=SID#One">\u200b'
+
+    assert is_supported_share_link(wrapped) is True
+
+    import_kind, payload = app._detect_import_target(wrapped)
+    server = parse_share_link(str(payload))
+
+    assert import_kind == "server"
+    assert server.protocol == "vless"
+    assert server.host == "example.com"
+    assert server.extra["public_key"] == "KEY"
+    assert server.extra["short_id"] == "SID"
 
 
 def test_fetch_subscription_servers_uses_v2rayn_user_agent() -> None:
