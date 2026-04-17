@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +17,14 @@ from .constants import (
     SUBSCRIPTIONS_FILE,
 )
 from .models import AppSettings, RuntimeState, ServerEntry, SubscriptionEntry
+
+
+class StorageCorruptionError(RuntimeError):
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        super().__init__(
+            f"Файл состояния поврежден и не может быть восстановлен автоматически: {path}"
+        )
 
 
 class JsonStorage:
@@ -46,18 +56,95 @@ class JsonStorage:
     @staticmethod
     def _ensure_file(path: Path, default: list[Any] | dict[str, Any]) -> None:
         if not path.exists():
-            path.write_text(json.dumps(default, indent=2, ensure_ascii=False), encoding="utf-8")
+            JsonStorage._write_json(path, default)
 
     @staticmethod
-    def _read_json(path: Path, default: list[Any] | dict[str, Any]) -> Any:
+    def _backup_path(path: Path) -> Path:
+        return path.with_name(f"{path.name}.bak")
+
+    @staticmethod
+    def _atomic_write_text(path: Path, content: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        file_descriptor, temp_name = tempfile.mkstemp(
+            dir=str(path.parent),
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+        )
+        temp_path = Path(temp_name)
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            with os.fdopen(file_descriptor, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            temp_path.replace(path)
+        except Exception:
+            temp_path.unlink(missing_ok=True)
+            raise
+
+    @classmethod
+    def _load_json_payload(
+        cls,
+        path: Path,
+        *,
+        expected_type: type[list[Any]] | type[dict[str, Any]],
+    ) -> Any:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, expected_type):
+            raise ValueError(f"Файл {path} содержит JSON неподходящего типа.")
+        return payload
+
+    @classmethod
+    def _read_json(
+        cls,
+        path: Path,
+        default: list[Any] | dict[str, Any],
+        *,
+        strict: bool = False,
+    ) -> Any:
+        expected_type = type(default)
+        try:
+            return cls._load_json_payload(path, expected_type=expected_type)
+        except FileNotFoundError:
+            backup_path = cls._backup_path(path)
+            try:
+                payload = cls._load_json_payload(backup_path, expected_type=expected_type)
+            except (OSError, json.JSONDecodeError, TypeError, ValueError):
+                return default
+            try:
+                cls._atomic_write_text(
+                    path,
+                    json.dumps(payload, indent=2, ensure_ascii=False),
+                )
+            except OSError:
+                pass
+            return payload
+        except (OSError, TypeError):
             return default
+        except (json.JSONDecodeError, ValueError) as exc:
+            backup_path = cls._backup_path(path)
+            try:
+                payload = cls._load_json_payload(backup_path, expected_type=expected_type)
+            except (OSError, json.JSONDecodeError, TypeError, ValueError):
+                if strict:
+                    raise StorageCorruptionError(path) from exc
+                return default
+            try:
+                cls._atomic_write_text(
+                    path,
+                    json.dumps(payload, indent=2, ensure_ascii=False),
+                )
+            except OSError:
+                pass
+            return payload
 
     @staticmethod
     def _write_json(path: Path, payload: Any) -> None:
-        path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        serialized = json.dumps(payload, indent=2, ensure_ascii=False)
+        JsonStorage._atomic_write_text(path, serialized)
+        try:
+            JsonStorage._atomic_write_text(JsonStorage._backup_path(path), serialized)
+        except OSError:
+            pass
 
     def load_servers(self) -> list[ServerEntry]:
         raw_items = self._read_json(SERVERS_FILE, [])
@@ -238,7 +325,11 @@ class JsonStorage:
         return target, affected_servers
 
     def load_runtime_state(self) -> RuntimeState:
-        raw = self._read_json(RUNTIME_STATE_FILE, RuntimeState().to_dict())
+        raw = self._read_json(
+            RUNTIME_STATE_FILE,
+            RuntimeState().to_dict(),
+            strict=True,
+        )
         return RuntimeState.from_dict(raw)
 
     def save_runtime_state(self, state: RuntimeState) -> None:

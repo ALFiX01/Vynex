@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from questionary import Choice
 from rich.console import Console
 
-from vynex_vpn_client.app import MAX_SERVER_NAME_DISPLAY_WIDTH, VynexVpnApp
+from vynex_vpn_client.app import MAX_SERVER_NAME_DISPLAY_WIDTH, RuntimeNotice, VynexVpnApp
 from vynex_vpn_client.backends import BaseVpnBackend
 from vynex_vpn_client.models import AppSettings, RuntimeState, ServerEntry
 from vynex_vpn_client.process_manager import State as XrayState
+from vynex_vpn_client.storage import StorageCorruptionError
+from vynex_vpn_client.system_proxy import SystemProxyState
 from vynex_vpn_client.tcp_ping import TCP_PING_UNSUPPORTED_ERROR, TcpPingResult
 
 
@@ -82,6 +85,48 @@ def test_current_state_preserves_runtime_during_xray_recovery() -> None:
     app.storage.save_runtime_state.assert_not_called()
 
 
+def test_current_state_recovers_from_corrupt_runtime_state() -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+    app.storage.load_runtime_state.side_effect = StorageCorruptionError(Path("runtime_state.json"))
+    xray_path = Path("C:/Program Files/Vynex/xray.exe")
+    app.process_manager._executable_path = xray_path
+    app.process_manager.list_running_instances.return_value = [
+        SimpleNamespace(pid=4321, executable_path=str(xray_path).lower())
+    ]
+    app.system_proxy_manager = Mock()
+    app.system_proxy_manager.snapshot.return_value = SystemProxyState(
+        proxy_enable=1,
+        proxy_server="http=127.0.0.1:18080;https=127.0.0.1:18080",
+    )
+
+    resolved_state = app._current_state()
+
+    assert resolved_state == RuntimeState()
+    app.process_manager.stop.assert_called_once_with(4321)
+    app.system_proxy_manager.disable_proxy.assert_called_once()
+    app.storage.save_runtime_state.assert_called_once_with(RuntimeState())
+    assert app._runtime_notice is not None
+    assert "поврежден" in app._runtime_notice.message.lower()
+
+
+def test_render_screen_uses_runtime_notice_title() -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+    app.logo = ""
+    app._runtime_notice = RuntimeNotice(
+        message="Health-check не подтвердил доступ в сеть, но подключение оставлено активным.",
+        title="Подключение установлено с предупреждением",
+        border_style="yellow",
+    )
+
+    with patch("vynex_vpn_client.app.os.system"):
+        app._render_screen()
+
+    output = app.console.export_text()
+    assert "Подключение установлено с предупреждением" in output
+    assert "Health-check не подтвердил доступ в сеть" in output
+    assert app._runtime_notice is None
+
+
 def test_banner_status_line_shows_xray_recovery() -> None:
     state = RuntimeState(
         pid=1001,
@@ -95,6 +140,8 @@ def test_banner_status_line_shows_xray_recovery() -> None:
 
     assert "Xray восстанавливается" in line
     assert "Test server" in line
+    assert "Режим:" in line
+    assert "PROXY" in line
 
 
 def test_banner_status_line_uses_awg_config_routing_label() -> None:
@@ -112,6 +159,18 @@ def test_banner_status_line_uses_awg_config_routing_label() -> None:
 
     assert "из AWG-конфига" in line
     assert "Умный" not in line
+    assert "TUN" in line
+
+
+def test_banner_status_line_shows_selected_mode_when_not_connected() -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+    app._validated_settings.return_value = AppSettings(connection_mode="TUN")
+
+    line = app._banner_status_line()
+
+    assert "Не подключено" in line
+    assert "Режим:" in line
+    assert "TUN" in line
 
 
 def test_runtime_pid_label_shows_restart_marker_while_xray_recovers() -> None:
@@ -378,4 +437,4 @@ def test_tcp_ping_summary_panel_shows_udp_only_note_for_amneziawg() -> None:
     assert "Не проверяется" in labels
     assert "Примечание" in labels
     assert "1" in values
-    assert "AMNEZIAWG использует UDP" in values[-1]
+    assert "UDP-протоколы" in values[-1]

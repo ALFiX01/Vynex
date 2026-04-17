@@ -45,10 +45,12 @@ if __package__ in {None, ""}:
         BackendConnectionProfile,
         BackendRuntimeRequest,
         BaseVpnBackend,
+        SingboxBackend,
         XrayBackend,
         select_backend,
     )
     from vynex_vpn_client.config_builder import XrayConfigBuilder
+    from vynex_vpn_client.singbox_config_builder import SingboxConfigBuilder
     from vynex_vpn_client.constants import (
         AMNEZIAWG_EXECUTABLE,
         AMNEZIAWG_EXECUTABLE_FALLBACK,
@@ -58,11 +60,12 @@ if __package__ in {None, ""}:
         GEOIP_PATH,
         GEOSITE_PATH,
         LOGO_FILE,
+        SINGBOX_EXECUTABLE,
         SUBSCRIPTION_TITLE_BY_HOST,
         XRAY_EXECUTABLE,
     )
     from vynex_vpn_client.healthcheck import HealthcheckResult, XrayHealthChecker
-    from vynex_vpn_client.core import XrayInstaller
+    from vynex_vpn_client.core import SingboxInstaller, XrayInstaller
     from vynex_vpn_client.models import (
         AppSettings,
         LocalProxyCredentials,
@@ -73,12 +76,13 @@ if __package__ in {None, ""}:
         utc_now_iso,
     )
     from vynex_vpn_client.parsers import is_supported_share_link, parse_server_entries, parse_share_link
-    from vynex_vpn_client.process_manager import State as XrayState, XrayProcessManager
+    from vynex_vpn_client.process_manager import SingboxProcessManager, State as XrayState, XrayProcessManager
     from vynex_vpn_client.routing_profiles import RoutingProfileManager
-    from vynex_vpn_client.storage import JsonStorage
+    from vynex_vpn_client.storage import JsonStorage, StorageCorruptionError
     from vynex_vpn_client.subscriptions import SubscriptionManager
     from vynex_vpn_client.system_proxy import SystemProxyState, WindowsSystemProxyManager
     from vynex_vpn_client.utils import (
+        RunningProcessDetails,
         WindowsInterfaceDetails,
         add_ipv4_route,
         clamp_port,
@@ -87,8 +91,10 @@ if __package__ in {None, ""}:
         get_active_ipv4_interface,
         get_interface_details,
         is_running_as_admin,
+        list_running_processes_by_names,
         pick_random_port,
         remove_ipv4_route,
+        terminate_running_processes,
         wait_for_port_listener,
         wait_for_tun_interface,
     )
@@ -109,10 +115,12 @@ else:
         BackendConnectionProfile,
         BackendRuntimeRequest,
         BaseVpnBackend,
+        SingboxBackend,
         XrayBackend,
         select_backend,
     )
     from .config_builder import XrayConfigBuilder
+    from .singbox_config_builder import SingboxConfigBuilder
     from .constants import (
         AMNEZIAWG_EXECUTABLE,
         AMNEZIAWG_EXECUTABLE_FALLBACK,
@@ -122,11 +130,12 @@ else:
         GEOIP_PATH,
         GEOSITE_PATH,
         LOGO_FILE,
+        SINGBOX_EXECUTABLE,
         SUBSCRIPTION_TITLE_BY_HOST,
         XRAY_EXECUTABLE,
     )
     from .healthcheck import HealthcheckResult, XrayHealthChecker
-    from .core import XrayInstaller
+    from .core import SingboxInstaller, XrayInstaller
     from .models import (
         AppSettings,
         LocalProxyCredentials,
@@ -137,9 +146,9 @@ else:
         utc_now_iso,
     )
     from .parsers import is_supported_share_link, parse_server_entries, parse_share_link
-    from .process_manager import State as XrayState, XrayProcessManager
+    from .process_manager import SingboxProcessManager, State as XrayState, XrayProcessManager
     from .routing_profiles import RoutingProfileManager
-    from .storage import JsonStorage
+    from .storage import JsonStorage, StorageCorruptionError
     from .subscriptions import SubscriptionManager
     from .system_proxy import SystemProxyState, WindowsSystemProxyManager
     from .tcp_ping import (
@@ -150,6 +159,7 @@ else:
         sort_tcp_ping_results,
     )
     from .utils import (
+        RunningProcessDetails,
         WindowsInterfaceDetails,
         add_ipv4_route,
         clamp_port,
@@ -158,14 +168,17 @@ else:
         get_active_ipv4_interface,
         get_interface_details,
         is_running_as_admin,
+        list_running_processes_by_names,
         pick_random_port,
         remove_ipv4_route,
+        terminate_running_processes,
         wait_for_port_listener,
         wait_for_tun_interface,
     )
 
 FLAG_EMOJI_PATTERN = re.compile(r"[\U0001F1E6-\U0001F1FF]{2}")
 MAX_SERVER_NAME_DISPLAY_WIDTH = 39
+WINWS_CONFLICT_PROCESS_NAMES = ("Winws.exe", "Winws2.exe")
 
 
 @dataclass(frozen=True)
@@ -174,17 +187,29 @@ class MenuAction:
     handler: Callable[[], None]
 
 
+@dataclass(frozen=True)
+class RuntimeNotice:
+    message: str
+    title: str = "Подключение остановлено"
+    border_style: str = "yellow"
+
+
 class VynexVpnApp:
     def __init__(self) -> None:
         self.console = Console()
         self.storage = JsonStorage()
         self.installer = XrayInstaller()
+        self.singbox_installer = SingboxInstaller()
         self.app_update_checker = AppUpdateChecker()
         self.app_updater = AppSelfUpdater()
         self.subscription_manager = SubscriptionManager(self.storage)
         self.routing_profiles = RoutingProfileManager()
         self.config_builder = XrayConfigBuilder()
+        self.singbox_config_builder = SingboxConfigBuilder()
         self.process_manager = XrayProcessManager(on_crash_callback=self._handle_xray_crash)
+        self.singbox_process_manager = SingboxProcessManager(
+            on_crash_callback=lambda: self._handle_backend_crash("singbox")
+        )
         self.amneziawg_process_manager = AmneziaWgProcessManager(
             on_crash_callback=lambda: self._handle_backend_crash("amneziawg")
         )
@@ -194,6 +219,11 @@ class VynexVpnApp:
                 installer=self.installer,
                 config_builder=self.config_builder,
                 process_manager=self.process_manager,
+            ),
+            "singbox": SingboxBackend(
+                installer=self.singbox_installer,
+                config_builder=self.singbox_config_builder,
+                process_manager=self.singbox_process_manager,
             ),
             "amneziawg": AmneziaWgBackend(
                 installer=self.installer,
@@ -206,7 +236,7 @@ class VynexVpnApp:
         self.app_release_info: AppReleaseInfo | None = self.app_update_checker.get_cached_release(max_age_seconds=None)
         self._app_update_thread: threading.Thread | None = None
         self._proxy_session: ProxyRuntimeSession | None = None
-        self._runtime_notice: str | None = None
+        self._runtime_notice: RuntimeNotice | None = None
         self._should_exit = False
         self.logo = self._load_logo()
 
@@ -263,9 +293,9 @@ class VynexVpnApp:
         if self._runtime_notice:
             self.console.print(
                 Panel.fit(
-                    self._runtime_notice,
-                    title="Подключение остановлено",
-                    border_style="yellow",
+                    self._runtime_notice.message,
+                    title=self._runtime_notice.title,
+                    border_style=self._runtime_notice.border_style,
                 )
             )
             self.console.print()
@@ -522,6 +552,8 @@ class VynexVpnApp:
         ).ask()
         if not selected_server_id or selected_server_id == "__back__":
             return
+        if not self._ensure_winws_conflicts_resolved():
+            return
         settings = self._validated_settings()
         mode = settings.connection_mode
         selected_server = next(server for server in servers if server.id == selected_server_id)
@@ -706,7 +738,7 @@ class VynexVpnApp:
                 ("Сервер", self._ui_server_name(selected_server.name)),
                 ("Протокол", selected_server.protocol.upper()),
                 ("Режим", self._connection_mode_label(mode)),
-                ("Маршрутизация", routing_display_label),
+                ("Маршрут", routing_display_label),
                 ("PID", str(pid)),
                 ("Системный proxy", "включен" if use_system_proxy else "не используется"),
             ]
@@ -737,7 +769,11 @@ class VynexVpnApp:
                 )
             )
             if health_warning is not None:
-                self._runtime_notice = health_warning
+                self._runtime_notice = RuntimeNotice(
+                    message=health_warning,
+                    title="Подключение установлено с предупреждением",
+                    border_style="yellow",
+                )
             self._pause()
         except Exception as exc:  # noqa: BLE001
             if mode == "TUN":
@@ -784,6 +820,54 @@ class VynexVpnApp:
             self._render_screen()
             self._show_error("Ошибка подключения", exc)
             self._pause()
+
+    def _ensure_winws_conflicts_resolved(self) -> bool:
+        conflicts = list_running_processes_by_names(WINWS_CONFLICT_PROCESS_NAMES)
+        if not conflicts:
+            return True
+
+        conflict_summary = self._format_process_conflict_summary(conflicts)
+        detail_rows = [
+            ("Процессы", conflict_summary),
+            ("Почему это важно", "Winws может препятствовать нормальной работе VPN."),
+            ("Что сделать", "Остановить их перед подключением. Клиент может завершить их автоматически."),
+        ]
+        self._render_screen()
+        self.console.print(
+            Panel.fit(
+                self._key_value_group(detail_rows),
+                title="Найдены конфликтующие процессы",
+                border_style="yellow",
+            )
+        )
+        should_terminate = bool(
+            questionary.confirm(
+                "Автоматически завершить Winws и продолжить подключение?",
+                default=True,
+            ).ask()
+        )
+        if not should_terminate:
+            self.console.print(
+                Panel.fit(
+                    "Подключение отменено. Остановите Winws.exe / Winws2.exe и повторите попытку.",
+                    border_style="yellow",
+                )
+            )
+            self._pause()
+            return False
+
+        failed_processes = terminate_running_processes(conflicts)
+        if failed_processes:
+            failed_summary = self._format_process_conflict_summary(failed_processes)
+            raise RuntimeError(
+                "Не удалось завершить конфликтующие процессы: "
+                f"{failed_summary}. Остановите их вручную и повторите подключение."
+            )
+        return True
+
+    @staticmethod
+    def _format_process_conflict_summary(processes: list[RunningProcessDetails] | tuple[RunningProcessDetails, ...]) -> str:
+        return ", ".join(f"{process.name} (PID {process.pid})" for process in processes)
 
     def disconnect_flow(self) -> None:
         state = self._current_state()
@@ -1352,6 +1436,7 @@ class VynexVpnApp:
                 "Компоненты",
                 choices=[
                     self._component_choice_label("Xray-core", XRAY_EXECUTABLE),
+                    self._component_choice_label("sing-box", SINGBOX_EXECUTABLE),
                     self._amneziawg_component_label(),
                     self._component_choice_label("geoip.dat", GEOIP_PATH),
                     self._component_choice_label("geosite.dat", GEOSITE_PATH),
@@ -1368,6 +1453,10 @@ class VynexVpnApp:
                     self._prepare_component_update()
                     path = self.installer.update_xray()
                     self._show_component_result("Xray-core обновлен", path.name)
+                elif selected_action.startswith("sing-box"):
+                    self._prepare_component_update()
+                    path = self.singbox_installer.update_singbox()
+                    self._show_component_result("sing-box обновлен", path.name)
                 elif selected_action.startswith("AmneziaWG"):
                     self._prepare_component_update()
                     self.installer.update_amneziawg()
@@ -1389,8 +1478,10 @@ class VynexVpnApp:
                 elif selected_action == "Обновить все компоненты":
                     self._prepare_component_update()
                     result = self.installer.update_all_components()
+                    singbox_path = self.singbox_installer.update_singbox()
                     profiles = self.routing_profiles.update_profiles()
                     updated_components = list(result.keys())
+                    updated_components.append(singbox_path.name)
                     updated_components.append(f"routing_profiles ({len(profiles)})")
                     self._show_component_result(
                         "Компоненты обновлены",
@@ -1478,7 +1569,7 @@ class VynexVpnApp:
         self.console.print(
             Panel.fit(
                 f"Активный набор: {selected_profile.name}\n{selected_profile.description}",
-                title="Маршрутизация обновлена",
+                title="Маршрут обновлен",
                 border_style="green",
             )
         )
@@ -1569,8 +1660,15 @@ class VynexVpnApp:
         except ValueError as exc:
             raise ValueError(f"Некорректное значение порта для '{title}'.") from exc
 
+    def _load_runtime_state_or_recover(self) -> RuntimeState:
+        try:
+            return self.storage.load_runtime_state()
+        except StorageCorruptionError as exc:
+            self._handle_runtime_state_corruption(exc)
+            return RuntimeState()
+
     def _current_state(self) -> RuntimeState:
-        state = self.storage.load_runtime_state()
+        state = self._load_runtime_state_or_recover()
         state = self._sync_runtime_state_with_manager(state)
         manager = self._process_manager_for_runtime_state(state)
         main_dead = bool(
@@ -1637,7 +1735,7 @@ class VynexVpnApp:
         )
 
     def _disconnect_runtime(self, *, silent: bool = False) -> None:
-        state = self.storage.load_runtime_state()
+        state = self._load_runtime_state_or_recover()
         backend_id = self._runtime_backend_id(state)
         if state.pid and str(state.mode or "").upper() == "TUN" and backend_id == "amneziawg":
             self._process_manager_for_runtime_state(state).stop(state.pid)
@@ -1716,7 +1814,7 @@ class VynexVpnApp:
         self._handle_backend_crash("xray")
 
     def _handle_backend_crash(self, backend_id: str) -> None:
-        state = self.storage.load_runtime_state()
+        state = self._load_runtime_state_or_recover()
         if self._runtime_backend_id(state) != backend_id:
             return
         mode = str(state.mode or "").upper()
@@ -1730,14 +1828,18 @@ class VynexVpnApp:
         self.storage.save_runtime_state(RuntimeState())
         engine_title = self._backend_engine_title(backend_id)
         if mode == "TUN":
-            self._runtime_notice = (
-                f"{engine_title} завершился и не смог восстановиться автоматически. "
-                "Сетевое состояние туннеля очищено, подключение сброшено."
+            self._runtime_notice = RuntimeNotice(
+                message=(
+                    f"{engine_title} завершился и не смог восстановиться автоматически. "
+                    "Сетевое состояние туннеля очищено, подключение сброшено."
+                ),
             )
             return
-        self._runtime_notice = (
-            f"{engine_title} завершился и не смог восстановиться автоматически. "
-            "Подключение сброшено, системный proxy возвращен в прежнее состояние."
+        self._runtime_notice = RuntimeNotice(
+            message=(
+                f"{engine_title} завершился и не смог восстановиться автоматически. "
+                "Подключение сброшено, системный proxy возвращен в прежнее состояние."
+            ),
         )
 
     def _get_active_routing_profile(self):
@@ -1765,6 +1867,8 @@ class VynexVpnApp:
     def _banner_status_line(self) -> str:
         state = self._current_state()
         settings = self._validated_settings(raise_on_error=False)
+        mode_value = state.mode if state.is_running and state.mode else settings.connection_mode
+        mode_label = escape(self._connection_mode_short_label(mode_value))
         routing_source = self._routing_display_name(
             state.backend_id if state.is_running else None,
             state.routing_profile_name if state.is_running and state.routing_profile_name else self._active_routing_profile_name(),
@@ -1784,12 +1888,13 @@ class VynexVpnApp:
             return (
                 f"[bold]Статус:[/bold] {self._runtime_status_markup(state)}"
                 f" | [bold]Сервер:[/bold] {server_name}"
+                f" | [bold]Режим:[/bold] {mode_label}"
                 f" | [bold]Маршрут:[/bold] {routing_name}"
                 f"{update_suffix}"
             )
-        proxy_mode = "авто" if settings.set_system_proxy else "выкл"
         return (
             "[bold]Статус:[/bold] [yellow]Не подключено[/yellow]"
+            f" | [bold]Режим:[/bold] {mode_label}"
             f" | [bold]Маршрут:[/bold] {routing_name}"
             f"{update_suffix}"
         )
@@ -2104,7 +2209,7 @@ class VynexVpnApp:
                 )
             if "не удалось добавить маршрут" in normalized:
                 return (
-                    "Xray поднял TUN интерфейс, но Windows не приняла маршруты для перехвата трафика.",
+                    "Ядро подключения подняло TUN интерфейс, но Windows не приняла маршруты для перехвата трафика.",
                     [
                         "Убедитесь, что приложение запущено от имени администратора.",
                         "Проверьте, не блокирует ли изменение маршрутов другой VPN-клиент или корпоративная политика Windows.",
@@ -2113,20 +2218,20 @@ class VynexVpnApp:
                 )
             if "tun интерфейс" in normalized and ("ipv4" in normalized or "инициализации" in normalized):
                 return (
-                    "Xray не смог вовремя поднять TUN интерфейс Windows.",
+                    "Ядро подключения не смогло вовремя поднять TUN интерфейс Windows.",
                     [
-                        "Проверьте, что в runtime присутствует `wintun.dll` и используется свежий Xray-core.",
+                        "Проверьте, что runtime движка собран полностью и не поврежден.",
                         "Если в системе уже работает другой VPN/TUN-драйвер, временно отключите его и повторите попытку.",
                     ],
                     details,
                 )
             if "локальные proxy-inbound" in normalized or "локальный proxy" in normalized:
                 return (
-                    "Xray не успел открыть локальные proxy-порты для текущей сессии.",
+                    "Ядро подключения не успело открыть локальные proxy-порты для текущей сессии.",
                     [
                         "Повторите подключение: клиент выберет новые случайные порты.",
-                        "Если ошибка повторяется, откройте 'Компоненты' и обновите Xray-core.",
-                        "Если Xray завершился сразу, используйте детали ниже для диагностики конкретной ошибки Xray.",
+                        "Если ошибка повторяется, обновите компоненты соответствующего движка в разделе 'Компоненты'.",
+                        "Если процесс завершился сразу, используйте детали ниже для диагностики конкретной ошибки runtime.",
                     ],
                     details,
                 )
@@ -2139,11 +2244,29 @@ class VynexVpnApp:
                     ],
                     details,
                 )
+            if "уже запущен sing-box.exe" in normalized:
+                return (
+                    "Обнаружен другой экземпляр sing-box, который мешает запуску клиента.",
+                    [
+                        "Остановите внешнюю копию sing-box.exe или завершите прошлое подключение.",
+                        "После этого повторите подключение.",
+                    ],
+                    details,
+                )
             if "xray.exe не найден" in normalized:
                 return (
                     "Исполняемый файл Xray отсутствует в runtime-каталоге.",
                     [
                         "Откройте 'Компоненты' и обновите Xray-core.",
+                        "Если используете .exe сборку, убедитесь, что файлы клиента не удалены антивирусом.",
+                    ],
+                    details,
+                )
+            if "sing-box.exe не найден" in normalized:
+                return (
+                    "Исполняемый файл sing-box отсутствует в runtime-каталоге.",
+                    [
+                        "Откройте 'Компоненты' и обновите sing-box.",
                         "Если используете .exe сборку, убедитесь, что файлы клиента не удалены антивирусом.",
                     ],
                     details,
@@ -2656,7 +2779,7 @@ class VynexVpnApp:
             ),
         )
         if unsupported_results:
-            table.add_row("Примечание", "AMNEZIAWG использует UDP и не проверяется через TCP ping.")
+            table.add_row("Примечание", "UDP-протоколы (AmneziaWG, Hysteria2) не проверяются через TCP ping.")
         return Panel.fit(
             table,
             title="TCP ping серверов",
@@ -2987,7 +3110,7 @@ class VynexVpnApp:
             ),
         )
         table.add_row(
-            "Маршрутизация",
+            "Маршрут",
             self._active_routing_profile_name(),
         )
         if settings.connection_mode == "TUN":
@@ -3008,7 +3131,7 @@ class VynexVpnApp:
         table.add_column("Параметр", no_wrap=True, style="bold")
         table.add_column("Значение", overflow="fold", max_width=max(34, self.console.width - 34))
         table.add_row("Сервер", server_name)
-        table.add_row("Маршрутизация", routing_name)
+        table.add_row("Маршрут", routing_name)
         table.add_row("Этап", step)
         self._render_screen()
         self.console.print(
@@ -3034,7 +3157,7 @@ class VynexVpnApp:
         state = self._current_state()
         if not state.is_running:
             return
-        runtime_label = "Xray"
+        runtime_label = self._backend_engine_title(self._runtime_backend_id(state))
         should_disconnect = questionary.confirm(
             f"Сейчас запущен {runtime_label}. Остановить подключение для обновления компонента?",
             default=True,
@@ -3061,7 +3184,7 @@ class VynexVpnApp:
         if not should_reset:
             return
         self.system_proxy_manager.disable_proxy()
-        state = self.storage.load_runtime_state()
+        state = self._load_runtime_state_or_recover()
         if state.system_proxy_enabled:
             state.system_proxy_enabled = False
             state.previous_system_proxy = None
@@ -3128,7 +3251,7 @@ class VynexVpnApp:
                 "TUN режим требует запуска приложения от имени администратора. "
                 "Перезапустите Vynex с повышенными правами."
             )
-        if backend is not None and backend.backend_id == "amneziawg":
+        if backend is not None and backend.backend_id in {"amneziawg", "singbox"}:
             return None
         outbound_interface = get_active_ipv4_interface(
             exclude_aliases={self._tun_interface_name(backend.backend_id if backend is not None else None)}
@@ -3219,6 +3342,96 @@ class VynexVpnApp:
             return
         self._cleanup_tun_routes(state)
 
+    def _handle_runtime_state_corruption(self, error: StorageCorruptionError) -> None:
+        self._proxy_session = None
+        self._best_effort_stop_managed_instances(getattr(self, "process_manager", None))
+        self._best_effort_stop_managed_instances(getattr(self, "singbox_process_manager", None))
+        self._best_effort_stop_managed_instances(getattr(self, "amneziawg_process_manager", None))
+        self._best_effort_disable_vynex_proxy()
+        try:
+            self.storage.save_runtime_state(RuntimeState())
+        except Exception:
+            pass
+        state_file = getattr(error, "path", None)
+        state_label = state_file.name if isinstance(state_file, Path) else "runtime_state.json"
+        self._runtime_notice = RuntimeNotice(
+            message=(
+                f"Файл состояния '{state_label}' был поврежден и не восстановился автоматически. "
+                "Активное подключение сброшено, локальный runtime и системный proxy очищены best-effort."
+            ),
+        )
+
+    def _best_effort_stop_managed_instances(self, manager: object | None) -> None:
+        if manager is None:
+            return
+        list_running_instances = getattr(manager, "list_running_instances", None)
+        stop = getattr(manager, "stop", None)
+        if not callable(list_running_instances) or not callable(stop):
+            return
+        target_paths = self._manager_target_paths(manager)
+        try:
+            instances = tuple(list_running_instances())
+        except Exception:
+            return
+        for instance in instances:
+            pid = getattr(instance, "pid", None)
+            executable_path = self._normalize_fs_path(getattr(instance, "executable_path", None))
+            if not pid:
+                continue
+            if target_paths and executable_path not in target_paths:
+                continue
+            try:
+                stop(pid)
+            except Exception:
+                continue
+
+    def _best_effort_disable_vynex_proxy(self) -> None:
+        proxy_manager = getattr(self, "system_proxy_manager", None)
+        if proxy_manager is None:
+            return
+        try:
+            snapshot = proxy_manager.snapshot()
+        except Exception:
+            return
+        if not WindowsSystemProxyManager.is_vynex_managed_state(snapshot):
+            return
+        try:
+            proxy_manager.disable_proxy()
+        except Exception:
+            pass
+
+    def _manager_target_paths(self, manager: object) -> set[str]:
+        target_paths: set[str] = set()
+        normalize_path = getattr(type(manager), "_normalize_path", None)
+        if not callable(normalize_path):
+            normalize_path = self._normalize_fs_path
+        executable_path = getattr(manager, "_executable_path", None)
+        if executable_path is not None:
+            normalized = normalize_path(str(executable_path))
+            if normalized:
+                target_paths.add(normalized)
+        iter_candidates = getattr(type(manager), "_iter_executable_candidates", None)
+        if callable(iter_candidates):
+            try:
+                candidates = tuple(iter_candidates(manager))
+            except Exception:
+                candidates = ()
+            for candidate in candidates:
+                normalized = normalize_path(str(candidate))
+                if normalized:
+                    target_paths.add(normalized)
+        return target_paths
+
+    @staticmethod
+    def _normalize_fs_path(value: object) -> str | None:
+        raw_value = str(value or "").strip()
+        if not raw_value:
+            return None
+        try:
+            return str(Path(raw_value).resolve()).lower()
+        except OSError:
+            return str(Path(raw_value)).lower()
+
     @staticmethod
     def _coerce_bool(value: object) -> bool:
         if isinstance(value, bool):
@@ -3250,6 +3463,10 @@ class VynexVpnApp:
             else "PROXY (браузер и приложения)"
         )
 
+    @staticmethod
+    def _connection_mode_short_label(value: str) -> str:
+        return "TUN" if str(value).upper() == "TUN" else "PROXY"
+
     def _backend_by_id(self, backend_id: str | None) -> BaseVpnBackend | None:
         backends = getattr(self, "backends", None)
         if isinstance(backends, dict) and backend_id in backends:
@@ -3267,6 +3484,8 @@ class VynexVpnApp:
             return backend.engine_name
         if backend_id == "amneziawg":
             return "amneziawg"
+        if backend_id == "singbox":
+            return "sing-box"
         return "xray"
 
     def _backend_engine_title(self, backend_id: str | None) -> str:
@@ -3275,6 +3494,8 @@ class VynexVpnApp:
             return backend.engine_title
         if backend_id == "amneziawg":
             return "AmneziaWG"
+        if backend_id == "singbox":
+            return "sing-box"
         return "Xray"
 
     def _tun_interface_name(self, backend_id: str | None) -> str:

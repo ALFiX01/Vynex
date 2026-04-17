@@ -43,29 +43,65 @@ class WindowsSystemProxyManager:
             )
 
     def enable_proxy(self, *, http_port: int, socks_port: int | None = None) -> None:
+        previous_state = self.snapshot()
         proxy_entries = [
             f"http={LOCAL_PROXY_HOST}:{http_port}",
             f"https={LOCAL_PROXY_HOST}:{http_port}",
         ]
         if socks_port is not None:
             proxy_entries.append(f"socks={LOCAL_PROXY_HOST}:{socks_port}")
-        proxy_server = ";".join(proxy_entries)
-        with winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER,
-            INTERNET_SETTINGS_KEY,
-            0,
-            winreg.KEY_SET_VALUE,
-        ) as key:
-            winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 1)
-            winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, proxy_server)
-            winreg.SetValueEx(key, "ProxyOverride", 0, winreg.REG_SZ, "<local>")
-            winreg.SetValueEx(key, "AutoConfigURL", 0, winreg.REG_SZ, "")
-        self._broadcast_settings_changed()
+        self._apply_state(
+            SystemProxyState(
+                proxy_enable=1,
+                proxy_server=";".join(proxy_entries),
+                proxy_override="<local>",
+                auto_config_url="",
+                auto_detect=previous_state.auto_detect,
+            ),
+            rollback_state=previous_state,
+        )
 
     def restore(self, state: SystemProxyState | None) -> None:
         if state is None:
             self.disable_proxy()
             return
+        self._apply_state(state)
+
+    def disable_proxy(self) -> None:
+        current_state = self.snapshot()
+        self._apply_state(
+            SystemProxyState(
+                proxy_enable=0,
+                proxy_server="",
+                proxy_override=current_state.proxy_override,
+                auto_config_url=current_state.auto_config_url,
+                auto_detect=current_state.auto_detect,
+            )
+        )
+
+    def _apply_state(
+        self,
+        state: SystemProxyState,
+        *,
+        rollback_state: SystemProxyState | None = None,
+    ) -> None:
+        try:
+            self._write_state(state)
+            self._broadcast_settings_changed()
+        except Exception:
+            if rollback_state is not None:
+                self._rollback_state(rollback_state)
+            raise
+
+    def _rollback_state(self, state: SystemProxyState) -> None:
+        try:
+            self._write_state(state)
+            self._broadcast_settings_changed()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _write_state(state: SystemProxyState) -> None:
         with winreg.OpenKey(
             winreg.HKEY_CURRENT_USER,
             INTERNET_SETTINGS_KEY,
@@ -77,18 +113,29 @@ class WindowsSystemProxyManager:
             winreg.SetValueEx(key, "ProxyOverride", 0, winreg.REG_SZ, state.proxy_override)
             winreg.SetValueEx(key, "AutoConfigURL", 0, winreg.REG_SZ, state.auto_config_url)
             winreg.SetValueEx(key, "AutoDetect", 0, winreg.REG_DWORD, int(state.auto_detect))
-        self._broadcast_settings_changed()
 
-    def disable_proxy(self) -> None:
-        with winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER,
-            INTERNET_SETTINGS_KEY,
-            0,
-            winreg.KEY_SET_VALUE,
-        ) as key:
-            winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
-            winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, "")
-        self._broadcast_settings_changed()
+    @staticmethod
+    def is_vynex_managed_state(state: SystemProxyState | None) -> bool:
+        if state is None or not int(state.proxy_enable):
+            return False
+        proxy_server = str(state.proxy_server or "").strip()
+        if not proxy_server:
+            return False
+        protocols: set[str] = set()
+        for raw_entry in proxy_server.split(";"):
+            entry = raw_entry.strip()
+            if not entry or "=" not in entry:
+                return False
+            protocol, address = (part.strip().lower() for part in entry.split("=", 1))
+            if protocol not in {"http", "https", "socks"}:
+                return False
+            if ":" not in address:
+                return False
+            host, port_text = address.rsplit(":", 1)
+            if host != LOCAL_PROXY_HOST or not port_text.isdigit():
+                return False
+            protocols.add(protocol)
+        return {"http", "https"}.issubset(protocols)
 
     @staticmethod
     def _read_dword(key: int, name: str, default: int) -> int:

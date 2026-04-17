@@ -1077,7 +1077,7 @@ class XrayProcessManager(_BaseProcessManager):
 
 
 class SingboxProcessManager(_BaseProcessManager):
-    def __init__(self) -> None:
+    def __init__(self, *, on_crash_callback: Callable[[], None] | None = None) -> None:
         super().__init__(
             process_image_name="sing-box.exe",
             executable_path=SINGBOX_EXECUTABLE,
@@ -1086,3 +1086,108 @@ class SingboxProcessManager(_BaseProcessManager):
             missing_executable_message="sing-box.exe не найден.",
             immediate_exit_message="sing-box завершился сразу после запуска без вывода в лог.",
         )
+        self._state = State.STOPPED
+        self.on_crash_callback = on_crash_callback
+
+    @property
+    def state(self) -> State:
+        with self._state_lock:
+            return self._state
+
+    def status(self) -> State:
+        return self.state
+
+    def start(self, config: dict[str, Any]) -> int:
+        with self._state_lock:
+            if self._state in {State.STARTING, State.RUNNING, State.STOPPING} and self._process is not None:
+                raise RuntimeError("sing-box уже запущен этим клиентом.")
+            self._state = State.STARTING
+        try:
+            pid = super().start(config)
+        except Exception:
+            with self._state_lock:
+                if self._state != State.STOPPING:
+                    self._state = State.CRASHED
+            raise
+        with self._state_lock:
+            self._state = State.RUNNING
+        return pid
+
+    def stop(self, pid: int | None = None) -> None:
+        target_pid = pid or self.pid
+        with self._state_lock:
+            if target_pid is None and self._process is None:
+                self._state = State.STOPPED
+                self._cleanup_temp_config()
+                return
+            self._state = State.STOPPING
+        try:
+            super().stop(target_pid)
+        finally:
+            with self._state_lock:
+                self._state = State.STOPPED
+
+    def restart(self, config: dict[str, Any]) -> int:
+        self.stop()
+        return self.start(config)
+
+    def collect_output(self, limit: int = 50) -> dict[str, tuple[str, ...]]:
+        with self._state_lock:
+            tail = tuple(list(self._output_tail)[-limit:])
+        return {
+            "stdout": tail,
+            "stderr": (),
+        }
+
+    def _watch_process(self, process: subprocess.Popen[str]) -> None:
+        try:
+            return_code = process.wait()
+        except Exception:  # noqa: BLE001
+            self._logger.exception(
+                "Failed to wait for %s pid=%s",
+                self._process_image_name,
+                process.pid,
+            )
+            return
+
+        callback: Callable[[], None] | None = None
+        with self._state_lock:
+            previous_state = self._state
+            intentional_stop = process.pid in self._stopping_pids
+            self._stopping_pids.discard(process.pid)
+            if self._process is process:
+                self._process = None
+            if intentional_stop:
+                self._state = State.STOPPED
+            elif previous_state != State.STOPPING:
+                self._state = State.CRASHED
+                if previous_state == State.RUNNING:
+                    callback = self.on_crash_callback
+
+        if intentional_stop:
+            self._logger.info(
+                "%s pid=%s stopped with code %s",
+                self._process_image_name,
+                process.pid,
+                return_code,
+            )
+            return
+
+        if return_code == 0:
+            self._logger.warning(
+                "%s pid=%s exited unexpectedly with code 0",
+                self._process_image_name,
+                process.pid,
+            )
+        else:
+            self._logger.warning(
+                "%s pid=%s exited unexpectedly with code %s",
+                self._process_image_name,
+                process.pid,
+                return_code,
+            )
+        if callback is not None:
+            try:
+                callback()
+            except Exception:  # noqa: BLE001
+                self._logger.exception("Crash callback failed for %s", self._process_image_name)

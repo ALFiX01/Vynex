@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
+
+import pytest
+import requests
 
 from vynex_vpn_client.app_update import AppReleaseInfo
 from vynex_vpn_client.app_updater import AppSelfUpdater, AppUpdateDownload
@@ -35,6 +39,15 @@ class _FakeSession:
 
     def get(self, url: str, *, stream: bool, timeout: int):  # noqa: ARG002
         return _FakeResponse(self._chunks)
+
+
+class _FailingSession:
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+        self.headers: dict[str, str] = {}
+
+    def get(self, url: str, *, stream: bool, timeout: int):  # noqa: ARG002
+        raise self._exc
 
 
 def _release_info() -> AppReleaseInfo:
@@ -107,3 +120,34 @@ def test_generate_helper_script_includes_expected_paths_and_commands(tmp_path: P
     assert 'move /Y "%STAGED_EXE%" "%TARGET_EXE%"' in script
     assert 'start "" /D "%TARGET_DIR%" "%TARGET_EXE%"' in script
     assert 'call :restore_backup' in script
+
+
+def test_download_release_cleans_up_files_after_request_error(tmp_path: Path) -> None:
+    updates_dir = tmp_path / "updates"
+    updater = AppSelfUpdater(
+        updates_dir=updates_dir,
+        session=_FailingSession(requests.ConnectionError("boom")),
+    )
+
+    with pytest.raises(RuntimeError, match="Не удалось скачать обновление приложения"):
+        updater.download_release(_release_info())
+
+    target_path = updates_dir / "VynexVPNClient-v99.0.0.exe"
+    assert not target_path.exists()
+    assert not target_path.with_suffix(".exe.part").exists()
+
+
+def test_download_release_cleans_up_files_after_size_mismatch(tmp_path: Path) -> None:
+    updates_dir = tmp_path / "updates"
+    updater = AppSelfUpdater(
+        updates_dir=updates_dir,
+        session=_FakeSession([b"hello ", b"world"]),
+    )
+    release_info = replace(_release_info(), asset_size=12)
+
+    with pytest.raises(RuntimeError, match="Размер скачанного файла не совпадает"):
+        updater.download_release(release_info)
+
+    target_path = updates_dir / "VynexVPNClient-v99.0.0.exe"
+    assert not target_path.exists()
+    assert not target_path.with_suffix(".exe.part").exists()

@@ -272,15 +272,19 @@ class XrayInstaller:
         if not target.exists():
             return None
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        result = subprocess.run(
-            [str(target), "version"],
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="ignore",
-            creationflags=creationflags,
-        )
+        try:
+            result = subprocess.run(
+                [str(target), "version"],
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+                creationflags=creationflags,
+                timeout=10,
+            )
+        except subprocess.TimeoutExpired:
+            return None
         output = (result.stdout or result.stderr or "").strip()
         match = re.search(r"Xray\s+(\d+)\.(\d+)\.(\d+)", output)
         if not match:

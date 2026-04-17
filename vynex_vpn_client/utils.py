@@ -12,6 +12,8 @@ import subprocess
 import time
 from urllib.parse import unquote
 
+import psutil
+
 from .constants import LOCAL_PROXY_HOST
 
 RUNTIME_PORT_MIN = 20000
@@ -26,6 +28,13 @@ class WindowsInterfaceDetails:
     status: str | None = None
     gateway: str | None = None
     has_route: bool = False
+
+
+@dataclass(frozen=True)
+class RunningProcessDetails:
+    pid: int
+    name: str
+    executable_path: str | None = None
 
 
 def decode_base64(data: str) -> str:
@@ -61,6 +70,89 @@ def is_running_as_admin() -> bool:
         return bool(ctypes.windll.shell32.IsUserAnAdmin())
     except Exception:  # noqa: BLE001
         return False
+
+
+def list_running_processes_by_names(names: list[str] | tuple[str, ...] | set[str]) -> list[RunningProcessDetails]:
+    expected_names = {str(name).strip().casefold() for name in names if str(name).strip()}
+    if not expected_names:
+        return []
+    matches: list[RunningProcessDetails] = []
+    for process in psutil.process_iter(["pid", "name", "exe"]):
+        try:
+            raw_name = str(process.info.get("name") or "").strip()
+            if not raw_name or raw_name.casefold() not in expected_names:
+                continue
+            raw_pid = int(process.info["pid"])
+            raw_path = str(process.info.get("exe") or "").strip() or None
+        except (KeyError, TypeError, ValueError, psutil.Error, OSError):
+            continue
+        matches.append(
+            RunningProcessDetails(
+                pid=raw_pid,
+                name=raw_name,
+                executable_path=raw_path,
+            )
+        )
+    matches.sort(key=lambda item: (item.name.casefold(), item.pid))
+    return matches
+
+
+def terminate_running_processes(
+    processes: list[RunningProcessDetails] | tuple[RunningProcessDetails, ...],
+    *,
+    timeout: float = 3.0,
+    kill_timeout: float = 2.0,
+) -> list[RunningProcessDetails]:
+    if not processes:
+        return []
+
+    managed_processes: list[psutil.Process] = []
+    process_info_by_pid: dict[int, RunningProcessDetails] = {}
+    failed_by_pid: dict[int, RunningProcessDetails] = {}
+
+    for process_info in processes:
+        try:
+            process = psutil.Process(process_info.pid)
+            actual_name = str(process.name() or "").strip()
+        except psutil.NoSuchProcess:
+            continue
+        except (psutil.AccessDenied, psutil.ZombieProcess, OSError):
+            failed_by_pid[process_info.pid] = process_info
+            continue
+        if actual_name and actual_name.casefold() != process_info.name.casefold():
+            continue
+        managed_processes.append(process)
+        process_info_by_pid[process.pid] = process_info
+
+    pending_processes: list[psutil.Process] = []
+    for process in managed_processes:
+        try:
+            process.terminate()
+        except psutil.NoSuchProcess:
+            continue
+        except (psutil.AccessDenied, psutil.ZombieProcess, OSError):
+            failed_by_pid[process.pid] = process_info_by_pid[process.pid]
+            continue
+        pending_processes.append(process)
+
+    gone, alive = psutil.wait_procs(pending_processes, timeout=max(timeout, 0.0))
+    del gone
+    retry_processes: list[psutil.Process] = []
+    for process in alive:
+        try:
+            process.kill()
+        except psutil.NoSuchProcess:
+            continue
+        except (psutil.AccessDenied, psutil.ZombieProcess, OSError):
+            failed_by_pid[process.pid] = process_info_by_pid[process.pid]
+            continue
+        retry_processes.append(process)
+
+    _, still_alive = psutil.wait_procs(retry_processes, timeout=max(kill_timeout, 0.0))
+    for process in still_alive:
+        failed_by_pid[process.pid] = process_info_by_pid[process.pid]
+
+    return sorted(failed_by_pid.values(), key=lambda item: (item.name.casefold(), item.pid))
 
 
 def is_port_available(port: int, host: str = LOCAL_PROXY_HOST) -> bool:

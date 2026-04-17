@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import zipfile
 from pathlib import Path
 from unittest.mock import patch
@@ -89,3 +90,14 @@ def test_ensure_xray_tun_runtime_raises_when_version_is_too_old(tmp_path: Path) 
             raise AssertionError("Expected RuntimeError for unsupported xray version")
 
     update_xray.assert_called_once()
+
+
+def test_get_xray_version_returns_none_on_timeout(tmp_path: Path) -> None:
+    xray_path = tmp_path / "xray.exe"
+    xray_path.write_bytes(b"")
+
+    with patch(
+        "vynex_vpn_client.core.subprocess.run",
+        side_effect=subprocess.TimeoutExpired(cmd=[str(xray_path), "version"], timeout=10),
+    ):
+        assert XrayInstaller.get_xray_version(xray_path) is None

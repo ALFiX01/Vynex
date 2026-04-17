@@ -58,6 +58,20 @@ def test_prepare_tun_prerequisites_skips_outbound_lookup_for_amneziawg() -> None
     get_active_interface.assert_not_called()
 
 
+def test_prepare_tun_prerequisites_skips_outbound_lookup_for_singbox() -> None:
+    app = _make_app()
+    backend = Mock()
+    backend.backend_id = "singbox"
+
+    with (
+        patch("vynex_vpn_client.app.is_running_as_admin", return_value=True),
+        patch("vynex_vpn_client.app.get_active_ipv4_interface") as get_active_interface,
+    ):
+        assert app._prepare_tun_prerequisites(backend=backend) is None
+
+    get_active_interface.assert_not_called()
+
+
 def test_wait_for_tun_ready_returns_interface_details() -> None:
     app = _make_app()
     details = WindowsInterfaceDetails(

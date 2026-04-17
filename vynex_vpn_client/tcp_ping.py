@@ -160,7 +160,8 @@ def sort_tcp_ping_results(
 
 
 def is_tcp_ping_unsupported_server(server: ServerEntry) -> bool:
-    return bool(getattr(server, "is_amneziawg", False)) or str(getattr(server, "protocol", "")).strip().lower() == "amneziawg"
+    protocol = str(getattr(server, "protocol", "")).strip().lower()
+    return bool(getattr(server, "is_amneziawg", False)) or protocol in {"amneziawg", "hy2", "hysteria2"}
 
 
 def is_tcp_ping_unsupported_result(result: TcpPingResult) -> bool:

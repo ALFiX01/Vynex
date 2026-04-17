@@ -7,10 +7,11 @@ from typing import Any, Protocol
 from .amneziawg_process_manager import AmneziaWgProcessManager
 from .amneziawg_runtime import AmneziaWgRuntimeArtifacts, AmneziaWgRuntimeBuilder
 from .config_builder import XrayConfigBuilder
-from .core import XrayInstaller
+from .core import SingboxInstaller, XrayInstaller
 from .models import ProxyRuntimeSession, ServerEntry
-from .process_manager import State, XrayProcessManager
+from .process_manager import SingboxProcessManager, State, XrayProcessManager
 from .routing_profiles import RoutingProfile
+from .singbox_config_builder import SingboxConfigBuilder
 
 AMNEZIAWG_PROTOCOLS = frozenset(
     {
@@ -21,6 +22,7 @@ AMNEZIAWG_PROTOCOLS = frozenset(
         "wireguard",
     }
 )
+SINGBOX_PROTOCOLS = frozenset({"hy2", "hysteria2"})
 
 
 class BackendProcessController(Protocol):
@@ -122,7 +124,8 @@ class XrayBackend(BaseVpnBackend):
         return self._process_manager
 
     def supports_connection(self, profile: BackendConnectionProfile) -> bool:
-        return profile.server.protocol.lower() not in AMNEZIAWG_PROTOCOLS
+        protocol = profile.server.protocol.lower()
+        return protocol not in AMNEZIAWG_PROTOCOLS and protocol not in SINGBOX_PROTOCOLS
 
     def ensure_runtime_ready(self, profile: BackendConnectionProfile) -> None:
         if self.installer is None:
@@ -143,6 +146,56 @@ class XrayBackend(BaseVpnBackend):
             )
         if request.proxy_session is None:
             raise ValueError("Для Proxy режима Xray backend нужен runtime-сеанс локального proxy.")
+        return self.config_builder.build(
+            server=profile.server,
+            mode=profile.mode,
+            routing_profile=profile.routing_profile,
+            socks_port=request.proxy_session.socks_port,
+            http_port=request.proxy_session.http_port,
+            socks_credentials=request.proxy_session.socks_credentials,
+        )
+
+
+class SingboxBackend(BaseVpnBackend):
+    backend_id = "singbox"
+    engine_name = "sing-box"
+    engine_title = "sing-box"
+    tun_interface_name = SingboxConfigBuilder.TUN_INTERFACE_NAME
+    tun_route_prefixes = ()
+
+    def __init__(
+        self,
+        *,
+        installer: SingboxInstaller | None,
+        config_builder: SingboxConfigBuilder,
+        process_manager: SingboxProcessManager,
+    ) -> None:
+        self.installer = installer
+        self.config_builder = config_builder
+        self._process_manager = process_manager
+
+    @property
+    def process_controller(self) -> BackendProcessController:
+        return self._process_manager
+
+    def supports_connection(self, profile: BackendConnectionProfile) -> bool:
+        return profile.server.protocol.lower() in SINGBOX_PROTOCOLS
+
+    def ensure_runtime_ready(self, profile: BackendConnectionProfile) -> None:
+        if self.installer is None:
+            raise RuntimeError("sing-box backend не инициализирован: отсутствует installer.")
+        self.installer.ensure_singbox()
+
+    def build_runtime_config(self, request: BackendRuntimeRequest) -> dict[str, Any]:
+        profile = request.profile
+        if profile.normalized_mode == "TUN":
+            return self.config_builder.build(
+                server=profile.server,
+                mode=profile.mode,
+                routing_profile=profile.routing_profile,
+            )
+        if request.proxy_session is None:
+            raise ValueError("Для Proxy режима sing-box backend нужен runtime-сеанс локального proxy.")
         return self.config_builder.build(
             server=profile.server,
             mode=profile.mode,

@@ -172,7 +172,9 @@ def _parse_uri(
     normalized = _normalize_uri_candidate(uri)
     lowered = normalized.lower()
     try:
-        if lowered.startswith(("vless://", "trojan://", "hy2://", "hysteria2://")):
+        if lowered.startswith(("hy2://", "hysteria2://")):
+            return _parse_hysteria2(normalized, source=source, subscription_id=subscription_id)
+        if lowered.startswith(("vless://", "trojan://")):
             return _parse_standard(normalized, source=source, subscription_id=subscription_id)
         if lowered.startswith("vmess://"):
             return _parse_vmess(normalized, source=source, subscription_id=subscription_id)
@@ -201,9 +203,6 @@ def _parse_standard(link: str, *, source: str, subscription_id: str | None) -> S
         return values[-1]
 
     protocol = parsed.scheme.lower()
-    if protocol == "hysteria2":
-        protocol = "hy2"
-
     credential = parsed.username or _param("password")
     if not credential:
         raise ValueError("В ссылке отсутствует идентификатор или пароль.")
@@ -236,10 +235,6 @@ def _parse_standard(link: str, *, source: str, subscription_id: str | None) -> S
         extra["encryption"] = _param("encryption", "none")
     else:
         extra["password"] = credential
-    if protocol == "hy2":
-        extra["obfs"] = _param("obfs")
-        extra["obfs_password"] = _param("obfs-password")
-
     return ServerEntry.new(
         name=name,
         protocol=protocol,
@@ -250,6 +245,123 @@ def _parse_standard(link: str, *, source: str, subscription_id: str | None) -> S
         source=source,
         subscription_id=subscription_id,
     )
+
+
+def _parse_hysteria2(link: str, *, source: str, subscription_id: str | None) -> ServerEntry:
+    split = urlsplit(link)
+    params = parse_qs(split.query, keep_blank_values=True)
+
+    def _param(name: str, default: str | None = None) -> str | None:
+        values = params.get(name)
+        if not values:
+            return default
+        return values[-1]
+
+    userinfo, host, port_spec = _parse_hysteria2_netloc(split.netloc)
+    if not host:
+        raise ValueError("Некорректная ссылка Hysteria2.")
+
+    password = unquote(userinfo) if userinfo else _param("password")
+    if not password:
+        raise ValueError("В ссылке Hysteria2 отсутствует пароль.")
+
+    port_source = port_spec or _param("mport")
+    port, server_ports = _parse_hysteria2_port_spec(port_source)
+    host_label = host if server_ports is None else f"{host}:{port_source}"
+    name = unquote(split.fragment) or host_label
+
+    extra: dict[str, Any] = {
+        "password": password,
+        "sni": url_decode(_param("sni")),
+        "obfs": _param("obfs"),
+        "obfs_password": _param("obfs-password") or _param("obfs_password"),
+        "pin_sha256": _param("pinSHA256"),
+        "alpn": _param("alpn"),
+        "insecure": _param("insecure"),
+        "allow_insecure": _param("allowInsecure"),
+        "up_mbps": _param("upmbps") or _param("up_mbps"),
+        "down_mbps": _param("downmbps") or _param("down_mbps"),
+        "hop_interval": _param("hopInterval") or _param("hop_interval"),
+        "hop_interval_max": _param("hopIntervalMax") or _param("hop_interval_max"),
+        "bbr_profile": _param("bbrProfile") or _param("bbr_profile"),
+    }
+    if server_ports is not None:
+        extra["server_ports"] = server_ports
+
+    return ServerEntry.new(
+        name=name,
+        protocol="hy2",
+        host=host,
+        port=port,
+        raw_link=link,
+        extra={key: value for key, value in extra.items() if value is not None},
+        source=source,
+        subscription_id=subscription_id,
+    )
+
+
+def _parse_hysteria2_netloc(netloc: str) -> tuple[str | None, str, str | None]:
+    userinfo: str | None = None
+    host_port = netloc
+    if "@" in netloc:
+        userinfo, host_port = netloc.rsplit("@", 1)
+    host_port = host_port.strip()
+    if not host_port:
+        raise ValueError("Некорректная ссылка Hysteria2.")
+    if host_port.startswith("["):
+        bracket_end = host_port.find("]")
+        if bracket_end == -1:
+            raise ValueError("Некорректная ссылка Hysteria2.")
+        host = host_port[1:bracket_end]
+        remainder = host_port[bracket_end + 1 :]
+        if not remainder:
+            return userinfo, host, None
+        if not remainder.startswith(":"):
+            raise ValueError("Некорректная ссылка Hysteria2.")
+        return userinfo, host, remainder[1:] or None
+    if host_port.count(":") == 0:
+        return userinfo, host_port, None
+    if host_port.count(":") == 1:
+        host, port_spec = host_port.split(":", 1)
+        return userinfo, host, port_spec or None
+    raise ValueError("Некорректная ссылка Hysteria2.")
+
+
+def _parse_hysteria2_port_spec(value: str | None) -> tuple[int, list[str] | None]:
+    if value in (None, ""):
+        return 443, None
+
+    parts = [item.strip() for item in str(value).split(",") if item.strip()]
+    if not parts:
+        raise ValueError("Некорректный порт Hysteria2.")
+    if len(parts) == 1 and "-" not in parts[0]:
+        port = int(parts[0])
+        if not 1 <= port <= 65535:
+            raise ValueError("Некорректный порт Hysteria2.")
+        return port, None
+
+    server_ports: list[str] = []
+    first_port: int | None = None
+    for part in parts:
+        if "-" in part:
+            start_text, end_text = part.split("-", 1)
+            start = int(start_text)
+            end = int(end_text)
+            if not 1 <= start <= end <= 65535:
+                raise ValueError("Некорректный диапазон портов Hysteria2.")
+            server_ports.append(f"{start}:{end}")
+            if first_port is None:
+                first_port = start
+            continue
+        port = int(part)
+        if not 1 <= port <= 65535:
+            raise ValueError("Некорректный порт Hysteria2.")
+        server_ports.append(str(port))
+        if first_port is None:
+            first_port = port
+    if first_port is None:
+        raise ValueError("Некорректный порт Hysteria2.")
+    return first_port, server_ports
 
 
 def _parse_vmess(link: str, *, source: str, subscription_id: str | None) -> ServerEntry:
@@ -457,12 +569,23 @@ def _normalize_singbox_extra(protocol: str, outbound: dict[str, Any]) -> dict[st
         if isinstance(utls, dict):
             extra.setdefault("fingerprint", utls.get("fingerprint"))
             extra.setdefault("fp", utls.get("fingerprint"))
+        certificate_pins = tls.get("certificate_public_key_sha256")
+        if isinstance(certificate_pins, list) and certificate_pins:
+            extra.setdefault("pin_sha256", str(certificate_pins[0]))
         reality = tls.get("reality")
         if isinstance(reality, dict):
             extra.setdefault("public_key", reality.get("public_key"))
             extra.setdefault("pbk", reality.get("public_key"))
             extra.setdefault("short_id", reality.get("short_id"))
             extra.setdefault("sid", reality.get("short_id"))
+    if protocol == "hy2":
+        obfs = outbound.get("obfs")
+        if isinstance(obfs, dict):
+            extra.setdefault("obfs", obfs.get("type"))
+            extra.setdefault("obfs_password", obfs.get("password"))
+        for key in ("server_ports", "hop_interval", "hop_interval_max", "up_mbps", "down_mbps", "bbr_profile", "brutal_debug"):
+            if outbound.get(key) is not None:
+                extra.setdefault(key, outbound.get(key))
 
     transport = outbound.get("transport")
     if isinstance(transport, dict):
@@ -532,6 +655,27 @@ def _normalize_clash_extra(protocol: str, proxy: dict[str, Any]) -> dict[str, An
 
     if proxy.get("skip-cert-verify") is True:
         extra["allow_insecure"] = "true"
+        extra["insecure"] = "true"
+    if protocol == "hy2":
+        if proxy.get("obfs"):
+            extra["obfs"] = str(proxy["obfs"])
+        obfs_password = proxy.get("obfs-password") or proxy.get("obfs_password")
+        if obfs_password:
+            extra["obfs_password"] = str(obfs_password)
+        if proxy.get("ports"):
+            extra["server_ports"] = proxy.get("ports")
+        if proxy.get("mport"):
+            extra["server_ports"] = proxy.get("mport")
+        if proxy.get("up"):
+            extra["up_mbps"] = proxy.get("up")
+        if proxy.get("down"):
+            extra["down_mbps"] = proxy.get("down")
+        if proxy.get("hop-interval"):
+            extra["hop_interval"] = proxy.get("hop-interval")
+        if proxy.get("hop_interval"):
+            extra["hop_interval"] = proxy.get("hop_interval")
+        if proxy.get("pinSHA256"):
+            extra["pin_sha256"] = proxy.get("pinSHA256")
 
     return {key: value for key, value in extra.items() if value is not None}
 
