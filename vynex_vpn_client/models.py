@@ -577,6 +577,7 @@ class AppSettings:
     active_routing_profile_id: str = "default"
     set_system_proxy: bool = True
     connection_mode: str = "PROXY"
+    auto_update_subscriptions_on_startup: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -587,4 +588,5 @@ class AppSettings:
             active_routing_profile_id=data.get("active_routing_profile_id", "default"),
             set_system_proxy=bool(data.get("set_system_proxy", True)),
             connection_mode=str(data.get("connection_mode", "PROXY") or "PROXY"),
+            auto_update_subscriptions_on_startup=bool(data.get("auto_update_subscriptions_on_startup", False)),
         )

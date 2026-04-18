@@ -198,3 +198,20 @@ def test_subscription_manager_updates_subscription_server_ids_with_stale_entries
     assert len(imported) == 2
     assert len(subscription.server_ids) == 2
     assert any(server.extra.get("stale") for server in imported)
+
+
+def test_refresh_all_only_updates_auto_update_subscriptions() -> None:
+    storage = Mock()
+    auto_subscription = SubscriptionEntry.new(url="https://example.com/auto", title="Auto")
+    manual_subscription = SubscriptionEntry.new(url="https://example.com/manual", title="Manual")
+    manual_subscription.auto_update = False
+    storage.load_subscriptions.return_value = [auto_subscription, manual_subscription]
+    storage.upsert_subscription = Mock()
+    manager = SubscriptionManager(storage)
+    manager.import_subscription = Mock(return_value=[_make_server("Server")])
+
+    success, failed = manager.refresh_all(only_auto_update=True)
+
+    assert failed == []
+    assert success == [(auto_subscription, 1)]
+    manager.import_subscription.assert_called_once_with(auto_subscription)

@@ -173,6 +173,36 @@ def test_banner_status_line_shows_selected_mode_when_not_connected() -> None:
     assert "TUN" in line
 
 
+def test_startup_auto_refresh_subscriptions_uses_global_setting() -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+    app._validated_settings.return_value = AppSettings(auto_update_subscriptions_on_startup=True)
+    app.storage.load_subscriptions.return_value = [Mock()]
+    app.subscription_manager = Mock()
+    app.subscription_manager.refresh_all.return_value = ([], [])
+
+    app._startup_auto_refresh_subscriptions()
+
+    app.subscription_manager.refresh_all.assert_called_once_with(only_auto_update=True)
+    assert app._runtime_notice is None
+
+
+def test_startup_auto_refresh_subscriptions_sets_notice_on_failures() -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+    app._validated_settings.return_value = AppSettings(auto_update_subscriptions_on_startup=True)
+    failed_subscription = Mock()
+    failed_subscription.title = "Problem sub"
+    app.storage.load_subscriptions.return_value = [failed_subscription]
+    app.subscription_manager = Mock()
+    app.subscription_manager.refresh_all.return_value = ([], [(failed_subscription, "timeout")])
+
+    app._startup_auto_refresh_subscriptions()
+
+    assert app._runtime_notice is not None
+    assert "С ошибками: 1" in app._runtime_notice.message
+    assert "Problem sub: timeout" in app._runtime_notice.message
+    assert app._runtime_notice.title == "Авто-обновление подписок"
+
+
 def test_runtime_pid_label_shows_restart_marker_while_xray_recovers() -> None:
     state = RuntimeState(pid=1001, mode="PROXY")
     app = _make_app(runtime_state=state, manager_state=XrayState.CRASHED, manager_pid=None)

@@ -46,6 +46,8 @@ class SubscriptionManager:
 
     def refresh_all(
         self,
+        *,
+        only_auto_update: bool = False,
     ) -> tuple[
         list[tuple[SubscriptionEntry, int]],
         list[tuple[SubscriptionEntry, str]],
@@ -53,6 +55,8 @@ class SubscriptionManager:
         success: list[tuple[SubscriptionEntry, int]] = []
         failed: list[tuple[SubscriptionEntry, str]] = []
         subscriptions = self.storage.load_subscriptions()
+        if only_auto_update:
+            subscriptions = [subscription for subscription in subscriptions if subscription.auto_update]
         for subscription in subscriptions:
             try:
                 imported = self.import_subscription(subscription)

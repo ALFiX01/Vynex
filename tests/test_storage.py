@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 import vynex_vpn_client.storage as storage_module
-from vynex_vpn_client.models import RuntimeState
+from vynex_vpn_client.models import AppSettings, RuntimeState
 from vynex_vpn_client.storage import JsonStorage, StorageCorruptionError
 
 
@@ -51,3 +51,15 @@ def test_load_runtime_state_raises_when_primary_and_backup_are_corrupt(tmp_path:
 
     with pytest.raises(StorageCorruptionError):
         storage.load_runtime_state()
+
+
+def test_settings_persist_auto_update_subscriptions_on_startup(tmp_path: Path, monkeypatch) -> None:
+    _configure_storage_paths(tmp_path, monkeypatch)
+    storage = JsonStorage()
+
+    assert storage.load_settings() == AppSettings()
+
+    updated = AppSettings(auto_update_subscriptions_on_startup=True)
+    storage.save_settings(updated)
+
+    assert storage.load_settings() == updated

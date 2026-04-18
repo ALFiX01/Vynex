@@ -245,6 +245,7 @@ class VynexVpnApp:
             self._ensure_xray_ready()
             self._reconcile_runtime_state()
             self._schedule_app_update_check()
+            self._startup_auto_refresh_subscriptions()
             self._startup_quick_import_flow()
             while True:
                 self._render_screen()
@@ -507,6 +508,45 @@ class VynexVpnApp:
         if self.storage.load_servers():
             return
         self._show_empty_servers_import_flow(title="Быстрый старт")
+
+    def _startup_auto_refresh_subscriptions(self) -> None:
+        try:
+            settings = self._validated_settings(raise_on_error=False)
+            if not settings.auto_update_subscriptions_on_startup:
+                return
+            if not self.storage.load_subscriptions():
+                return
+            success, failed = self.subscription_manager.refresh_all(only_auto_update=True)
+        except Exception as exc:  # noqa: BLE001
+            self._runtime_notice = RuntimeNotice(
+                message=f"Не удалось запустить авто-обновление подписок: {self._error_text(exc)}",
+                title="Авто-обновление подписок",
+                border_style="red",
+            )
+            return
+
+        if not failed:
+            return
+
+        details = ", ".join(
+            f"{self._ui_subscription_title(subscription.title)}: {error}"
+            for subscription, error in failed[:2]
+        )
+        remaining = len(failed) - 2
+        if remaining > 0:
+            details = f"{details}, еще ошибок: {remaining}" if details else f"Еще ошибок: {remaining}"
+        message = (
+            "При запуске не все подписки удалось обновить.\n"
+            f"Успешно: {len(success)}\n"
+            f"С ошибками: {len(failed)}"
+        )
+        if details:
+            message = f"{message}\n{details}"
+        self._runtime_notice = RuntimeNotice(
+            message=message,
+            title="Авто-обновление подписок",
+            border_style="yellow" if success else "red",
+        )
 
     def _show_empty_servers_import_flow(self, *, title: str) -> None:
         while not self.storage.load_servers():
@@ -1385,6 +1425,11 @@ class VynexVpnApp:
                 choices=[
                     f"Режим подключения: {self._connection_mode_label(settings.connection_mode)}",
                     "Системный proxy (PROXY): Вкл" if settings.set_system_proxy else "Системный proxy (PROXY): Выкл",
+                    (
+                        "Авто-обновление подписок при запуске: Вкл"
+                        if settings.auto_update_subscriptions_on_startup
+                        else "Авто-обновление подписок при запуске: Выкл"
+                    ),
                     f"Набор маршрутизации: {active_routing_name}",
                     "Сбросить системный proxy",
                     "Назад",
@@ -1416,6 +1461,16 @@ class VynexVpnApp:
                     if system_proxy_answer is None:
                         continue
                     settings.set_system_proxy = bool(system_proxy_answer)
+                    self.storage.save_settings(settings)
+                    self._show_settings_saved(settings)
+                elif selected_action.startswith("Авто-обновление подписок при запуске:"):
+                    auto_update_answer = questionary.confirm(
+                        "Обновлять подписки автоматически при запуске клиента?",
+                        default=settings.auto_update_subscriptions_on_startup,
+                    ).ask()
+                    if auto_update_answer is None:
+                        continue
+                    settings.auto_update_subscriptions_on_startup = bool(auto_update_answer)
                     self.storage.save_settings(settings)
                     self._show_settings_saved(settings)
                 elif selected_action.startswith("Набор маршрутизации:"):
@@ -1597,6 +1652,10 @@ class VynexVpnApp:
             table.add_row(
                 "Системный proxy",
                 "Авто" if settings.connection_mode == "PROXY" and settings.set_system_proxy else "Выкл",
+            )
+            table.add_row(
+                "Подписки при запуске",
+                "обновлять автоматически" if settings.auto_update_subscriptions_on_startup else "не обновлять",
             )
             table.add_row(
                 "Маршрут",
@@ -3110,6 +3169,10 @@ class VynexVpnApp:
             ),
         )
         table.add_row(
+            "Подписки при запуске",
+            "обновлять автоматически" if settings.auto_update_subscriptions_on_startup else "не обновлять",
+        )
+        table.add_row(
             "Маршрут",
             self._active_routing_profile_name(),
         )
@@ -3224,6 +3287,9 @@ class VynexVpnApp:
         try:
             settings.set_system_proxy = self._coerce_bool(settings.set_system_proxy)
             settings.connection_mode = self._coerce_connection_mode(settings.connection_mode)
+            settings.auto_update_subscriptions_on_startup = self._coerce_bool(
+                settings.auto_update_subscriptions_on_startup
+            )
             return settings
         except (TypeError, ValueError) as exc:
             if raise_on_error:
