@@ -7,9 +7,15 @@ from unittest.mock import Mock, patch
 from questionary import Choice
 from rich.console import Console
 
-from vynex_vpn_client.app import MAX_SERVER_NAME_DISPLAY_WIDTH, RuntimeNotice, VynexVpnApp
+from vynex_vpn_client.app import (
+    MAX_SERVER_NAME_DISPLAY_WIDTH,
+    RuntimeNotice,
+    SelectActionResult,
+    TerminalInquirerControl,
+    VynexVpnApp,
+)
 from vynex_vpn_client.backends import BaseVpnBackend
-from vynex_vpn_client.models import AppSettings, RuntimeState, ServerEntry
+from vynex_vpn_client.models import AppSettings, RuntimeState, ServerEntry, SubscriptionEntry
 from vynex_vpn_client.process_manager import State as XrayState
 from vynex_vpn_client.storage import StorageCorruptionError
 from vynex_vpn_client.system_proxy import SystemProxyState
@@ -468,3 +474,81 @@ def test_tcp_ping_summary_panel_shows_udp_only_note_for_amneziawg() -> None:
     assert "Примечание" in labels
     assert "1" in values
     assert "UDP-протоколы" in values[-1]
+
+
+def test_persist_tcp_ping_results_can_preserve_other_cached_entries() -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+    first = ServerEntry.new(
+        name="First",
+        protocol="vless",
+        host="first.example.com",
+        port=443,
+        raw_link="",
+        extra={"id": "first-id", "tcp_ping_ms": 21, "tcp_ping_ok": True},
+    )
+    second = ServerEntry.new(
+        name="Second",
+        protocol="vmess",
+        host="second.example.com",
+        port=8443,
+        raw_link="",
+        extra={"id": "second-id", "tcp_ping_ms": 77, "tcp_ping_ok": True},
+    )
+
+    app._persist_tcp_ping_results(
+        [first, second],
+        [TcpPingResult(first.id, True, 19, None, "2026-04-19T10:00:00+00:00")],
+        clear_missing=False,
+    )
+
+    assert first.extra["tcp_ping_ms"] == 19
+    assert second.extra["tcp_ping_ms"] == 77
+    app.storage.save_servers.assert_called_once_with([first, second])
+
+
+def test_handle_server_manager_shortcut_refreshes_selected_server_ping() -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+    app._refresh_server_tcp_ping_cache = Mock()
+
+    app._handle_server_manager_shortcut(SelectActionResult(action="refresh", value="server-42"))
+
+    app._refresh_server_tcp_ping_cache.assert_called_once_with("server-42")
+
+
+def test_handle_subscription_manager_shortcut_refreshes_selected_subscription() -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+    subscription = SubscriptionEntry.new(url="https://example.com/sub", title="Example")
+    imported = [
+        ServerEntry.new(
+            name="Imported",
+            protocol="vless",
+            host="example.com",
+            port=443,
+            raw_link="",
+            extra={"id": "imported-id"},
+        )
+    ]
+    app.storage.get_subscription.return_value = subscription
+    app._refresh_subscription = Mock(return_value=imported)
+    app._show_subscription_refresh_success = Mock()
+
+    app._handle_subscription_manager_shortcut(SelectActionResult(action="refresh", value=subscription.id))
+
+    app._refresh_subscription.assert_called_once_with(subscription)
+    app._show_subscription_refresh_success.assert_called_once_with("Подписка обновлена", subscription, imported)
+
+
+def test_terminal_inquirer_control_filters_formatted_choice_titles() -> None:
+    control = TerminalInquirerControl(
+        choices=[
+            Choice(title="Proxy server", value="proxy"),
+            Choice(title=[("class:terminal-danger", "Назад")], value="__back__"),
+        ],
+        use_shortcuts=False,
+    )
+
+    control.search_filter = "наз"
+    filtered = control.filtered_choices
+
+    assert len(filtered) == 1
+    assert filtered[0].value == "__back__"

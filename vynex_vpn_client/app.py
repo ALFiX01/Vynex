@@ -24,6 +24,7 @@ from questionary.prompts.select import (
     merge_styles_default,
     utils,
 )
+from prompt_toolkit.filters import Condition
 from rich.console import Console, Group
 from rich.markup import escape
 from rich.panel import Panel
@@ -192,6 +193,36 @@ class RuntimeNotice:
     message: str
     title: str = "Подключение остановлено"
     border_style: str = "yellow"
+
+
+@dataclass(frozen=True)
+class SelectActionResult:
+    action: str
+    value: object
+
+
+class TerminalInquirerControl(InquirerControl):
+    @staticmethod
+    def _searchable_title(choice: Choice) -> str:
+        title = getattr(choice, "title", "")
+        if isinstance(title, str):
+            return title
+        if isinstance(title, list):
+            return "".join(token[1] for token in title)
+        return str(title)
+
+    @property
+    def filtered_choices(self):
+        if not self.search_filter:
+            return self.choices
+        search_filter = str(self.search_filter).lower()
+        filtered = [
+            choice
+            for choice in self.choices
+            if search_filter in self._searchable_title(choice).lower()
+        ]
+        self.found_in_search = len(filtered) > 0
+        return filtered if self.found_in_search else self.choices
 
 
 class VynexVpnApp:
@@ -397,14 +428,31 @@ class VynexVpnApp:
                         value=server.id,
                     )
                 )
-            choices.append(Choice(title="Обновить TCP ping", value="__tcp_ping_all__"))
+            if servers:
+                choices.append(Choice(title="Обновить TCP ping у всех", value="__tcp_ping_all__"))
             choices.append(Choice(title="Быстрый импорт: сервер / подписка", value="__add__"))
             choices.append(Choice(title="Назад", value="__back__"))
             selected_action = self._select(
                 "Менеджер серверов",
                 choices=choices,
-                use_shortcuts=True,
+                instruction=self._server_manager_instruction(),
+                shortcut_actions=[
+                    ((Keys.Delete,), "delete"),
+                    (("e",), "edit"),
+                    (("r",), "refresh"),
+                ],
+                activate_search_on=("/",),
             ).ask()
+            if isinstance(selected_action, SelectActionResult):
+                try:
+                    self._handle_server_manager_shortcut(selected_action)
+                except Exception as exc:  # noqa: BLE001
+                    if not self._is_user_cancelled(exc):
+                        self._render_screen()
+                        self._show_error("Ошибка сервера", exc)
+                        self._pause()
+                last_ping_signature = self._servers_tcp_ping_signature(self.storage.load_servers())
+                continue
             if selected_action in (None, "__back__"):
                 return
             if selected_action == "__tcp_ping_all__":
@@ -492,8 +540,23 @@ class VynexVpnApp:
             selected_action = self._select(
                 "Менеджер подписок",
                 choices=choices,
-                use_shortcuts=True,
+                instruction=self._subscription_manager_instruction(),
+                shortcut_actions=[
+                    ((Keys.Delete,), "delete"),
+                    (("e",), "edit"),
+                    (("r",), "refresh"),
+                ],
+                activate_search_on=("/",),
             ).ask()
+            if isinstance(selected_action, SelectActionResult):
+                try:
+                    self._handle_subscription_manager_shortcut(selected_action)
+                except Exception as exc:  # noqa: BLE001
+                    if not self._is_user_cancelled(exc):
+                        self._render_screen()
+                        self._show_error("Ошибка подписки", exc)
+                        self._pause()
+                continue
             if selected_action in (None, "__back__"):
                 return
             if selected_action == "__add__":
@@ -973,6 +1036,50 @@ class VynexVpnApp:
                 self._show_error("Ошибка сервера", exc)
                 self._pause()
 
+    def _edit_server_from_list_flow(self, server: ServerEntry) -> None:
+        if server.source == "subscription":
+            self._rename_server_flow(server)
+            return
+        if server.is_amneziawg:
+            self._rename_server_flow(server)
+            return
+        selected_action = self._select(
+            "Редактировать сервер",
+            choices=[
+                "Переименовать",
+                "Изменить ссылку",
+                "Назад",
+            ],
+            use_shortcuts=True,
+        ).ask()
+        if selected_action in (None, "Назад"):
+            return
+        if selected_action == "Переименовать":
+            self._rename_server_flow(server)
+            return
+        if selected_action == "Изменить ссылку":
+            self._edit_server_link_flow(server)
+
+    def _handle_server_manager_shortcut(self, action_result: SelectActionResult) -> None:
+        selected_value = action_result.value
+        if selected_value in (None, "__back__", "__add__"):
+            return
+        if action_result.action == "refresh":
+            if selected_value == "__tcp_ping_all__":
+                self.tcp_ping_all_flow()
+                return
+            self._refresh_server_tcp_ping_cache(str(selected_value))
+            return
+        if selected_value == "__tcp_ping_all__":
+            return
+        server = self.storage.get_server(str(selected_value))
+        if server is None:
+            return
+        if action_result.action == "edit":
+            self._edit_server_from_list_flow(server)
+        elif action_result.action == "delete":
+            self._delete_server_with_prompt(server)
+
     def delete_server_flow(self) -> None:
         servers = self._sorted_servers(self.storage.load_servers())
         if not servers:
@@ -1264,6 +1371,48 @@ class VynexVpnApp:
                 self._render_screen()
                 self._show_error("Ошибка подписки", exc)
                 self._pause()
+
+    def _edit_subscription_from_list_flow(self, subscription: SubscriptionEntry) -> None:
+        selected_action = self._select(
+            "Редактировать подписку",
+            choices=[
+                "Изменить название",
+                "Изменить URL",
+                "Назад",
+            ],
+            use_shortcuts=True,
+        ).ask()
+        if selected_action in (None, "Назад"):
+            return
+        if selected_action == "Изменить название":
+            self._rename_subscription_flow(subscription)
+            return
+        if selected_action == "Изменить URL":
+            self._edit_subscription_url_flow(subscription)
+
+    def _handle_subscription_manager_shortcut(self, action_result: SelectActionResult) -> None:
+        selected_value = action_result.value
+        if selected_value in (None, "__back__", "__add__"):
+            return
+        if action_result.action == "refresh":
+            if selected_value == "__refresh_all__":
+                self.update_subscriptions_flow()
+                return
+            subscription = self.storage.get_subscription(str(selected_value))
+            if subscription is None:
+                return
+            imported = self._refresh_subscription(subscription)
+            self._show_subscription_refresh_success("Подписка обновлена", subscription, imported)
+            return
+        if selected_value == "__refresh_all__":
+            return
+        subscription = self.storage.get_subscription(str(selected_value))
+        if subscription is None:
+            return
+        if action_result.action == "edit":
+            self._edit_subscription_from_list_flow(subscription)
+        elif action_result.action == "delete":
+            self._delete_subscription_flow(subscription)
 
     def _rename_subscription_flow(self, subscription: SubscriptionEntry) -> None:
         default_title = self._ui_subscription_title(subscription.title)
@@ -1659,7 +1808,7 @@ class VynexVpnApp:
                 self._active_routing_profile_name(),
             )
             if settings.connection_mode == "TUN":
-                table.add_row("TUN", "нужны права администратора, маршруты IPv4 ставятся автоматически")
+                table.add_row("TUN", "нужны права администратора")
             self._render_screen()
             self.console.print(
                 Panel.fit(
@@ -2751,21 +2900,42 @@ class VynexVpnApp:
             self.tcp_ping_service = service
         return service
 
-    def _persist_tcp_ping_results(self, servers: list[ServerEntry], results: list[TcpPingResult]) -> None:
+    def _persist_tcp_ping_results(
+        self,
+        servers: list[ServerEntry],
+        results: list[TcpPingResult],
+        *,
+        clear_missing: bool = True,
+    ) -> None:
         result_by_id = {result.server_id: result for result in results}
         for server in servers:
             result = result_by_id.get(server.id)
             if result is None:
-                server.extra.pop("tcp_ping_ms", None)
-                server.extra.pop("tcp_ping_ok", None)
-                server.extra.pop("tcp_ping_error", None)
-                server.extra.pop("tcp_ping_checked_at", None)
+                if clear_missing:
+                    server.extra.pop("tcp_ping_ms", None)
+                    server.extra.pop("tcp_ping_ok", None)
+                    server.extra.pop("tcp_ping_error", None)
+                    server.extra.pop("tcp_ping_checked_at", None)
                 continue
             server.extra["tcp_ping_ms"] = result.latency_ms
             server.extra["tcp_ping_ok"] = result.ok
             server.extra["tcp_ping_error"] = result.error
             server.extra["tcp_ping_checked_at"] = result.checked_at
         self.storage.save_servers(servers)
+
+    def _refresh_server_tcp_ping_cache(self, server_id: str) -> None:
+        servers = self.storage.load_servers()
+        server = next((item for item in servers if item.id == server_id), None)
+        if server is None:
+            return
+        results = self._run_servers_tcp_ping(
+            [server],
+            status_message=(
+                f"[bold cyan]Обновляем TCP ping: {self._ui_server_name(server.name)} "
+                f"({server.host}:{server.port})...[/bold cyan]"
+            ),
+        )
+        self._persist_tcp_ping_results(servers, results, clear_missing=False)
 
     def _refresh_servers_tcp_ping_cache(
         self,
@@ -2782,7 +2952,7 @@ class VynexVpnApp:
                 or f"[bold cyan]Проверяем TCP ping для {len(servers)} серверов...[/bold cyan]"
             ),
         )
-        self._persist_tcp_ping_results(servers, results)
+        self._persist_tcp_ping_results(servers, results, clear_missing=True)
         return servers
 
     def _run_servers_tcp_ping(
@@ -3716,6 +3886,8 @@ class VynexVpnApp:
         show_selected: bool = False,
         show_description: bool = True,
         instruction: str | None = None,
+        shortcut_actions: list[tuple[tuple[object, ...], str]] | None = None,
+        activate_search_on: tuple[object, ...] = (),
         **kwargs,
     ) -> Question:
         if not (use_arrow_keys or use_shortcuts or use_jk_keys or use_emacs_keys):
@@ -3743,7 +3915,7 @@ class VynexVpnApp:
                 )
 
         merged_style = merge_styles_default([style])
-        ic = InquirerControl(
+        ic = TerminalInquirerControl(
             choices,
             default,
             pointer=pointer,
@@ -3778,15 +3950,30 @@ class VynexVpnApp:
 
         layout = common.create_inquirer_layout(ic, get_prompt_tokens, **kwargs)
         bindings = KeyBindings()
+        search_active = Condition(lambda: ic.search_filter is not None)
+        search_inactive = ~search_active
 
         @bindings.add(Keys.ControlQ, eager=True)
         @bindings.add(Keys.ControlC, eager=True)
         def abort_prompt(event):
             event.app.exit(exception=KeyboardInterrupt, style="class:aborting")
 
+        if activate_search_on:
+
+            def activate_search(event):
+                if ic.search_filter is None:
+                    ic.search_filter = ""
+
+            for key in activate_search_on:
+                bindings.add(key, eager=True, filter=search_inactive)(activate_search)
+
+            @bindings.add(Keys.Escape, eager=True, filter=search_active)
+            def clear_search(event):
+                ic.search_filter = None
+
         if back_choice_value is not None:
 
-            @bindings.add(Keys.Escape, eager=True)
+            @bindings.add(Keys.Escape, eager=True, filter=search_inactive)
             def select_back(event):
                 ic.is_answered = True
                 event.app.exit(result=back_choice_value)
@@ -3801,11 +3988,27 @@ class VynexVpnApp:
                     continue
 
                 def _reg_binding(choice_index, keys):
-                    @bindings.add(keys, eager=True)
+                    @bindings.add(keys, eager=True, filter=search_inactive)
                     def select_choice(event):
                         ic.pointed_at = choice_index
 
                 _reg_binding(index, choice.shortcut_key)
+
+        if shortcut_actions:
+            for keys, action_name in shortcut_actions:
+
+                def _register_action(keys_to_bind, registered_action):
+                    @bindings.add(*keys_to_bind, eager=True, filter=search_inactive)
+                    def trigger_action(event):
+                        ic.is_answered = True
+                        event.app.exit(
+                            result=SelectActionResult(
+                                action=registered_action,
+                                value=ic.get_pointed_at().value,
+                            )
+                        )
+
+                _register_action(keys, action_name)
 
         def move_cursor_down(event):
             ic.select_next()
@@ -3825,13 +4028,21 @@ class VynexVpnApp:
             for character in string.printable:
                 bindings.add(character, eager=True)(search_filter)
             bindings.add(Keys.Backspace, eager=True)(search_filter)
+        elif activate_search_on:
+
+            def search_filter(event):
+                ic.add_search_character(event.key_sequence[0].key)
+
+            for character in string.printable:
+                bindings.add(character, eager=True, filter=search_active)(search_filter)
+            bindings.add(Keys.Backspace, eager=True, filter=search_active)(search_filter)
 
         if use_arrow_keys:
             bindings.add(Keys.Down, eager=True)(move_cursor_down)
             bindings.add(Keys.Up, eager=True)(move_cursor_up)
         if use_jk_keys:
-            bindings.add("j", eager=True)(move_cursor_down)
-            bindings.add("k", eager=True)(move_cursor_up)
+            bindings.add("j", eager=True, filter=search_inactive)(move_cursor_down)
+            bindings.add("k", eager=True, filter=search_inactive)(move_cursor_up)
         if use_emacs_keys:
             bindings.add(Keys.ControlN, eager=True)(move_cursor_down)
             bindings.add(Keys.ControlP, eager=True)(move_cursor_up)
@@ -3861,7 +4072,16 @@ class VynexVpnApp:
         if choices is not None:
             kwargs["choices"] = VynexVpnApp._with_terminal_choice_spacing(choices)
         kwargs["style"] = VynexVpnApp._menu_select_style(kwargs.get("style"))
-        return VynexVpnApp._select_with_escape_back(message, instruction=" ", **kwargs)
+        kwargs.setdefault("instruction", " ")
+        return VynexVpnApp._select_with_escape_back(message, **kwargs)
+
+    @staticmethod
+    def _server_manager_instruction() -> str:
+        return "Enter открыть, Del удалить, E редактировать, R обновить ping, / фильтр, Esc назад"
+
+    @staticmethod
+    def _subscription_manager_instruction() -> str:
+        return "Enter открыть, Del удалить, E редактировать, R обновить, / фильтр, Esc назад"
 
     @staticmethod
     def _subscription_default_title(url: str) -> str:
