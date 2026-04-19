@@ -316,7 +316,7 @@ class VynexVpnApp:
         status.pad_left(1)
         status.truncate(max_content_width, overflow="ellipsis")
         banner = Group(Text(""), title, Text(""), status)
-        self.console.print(banner)
+        self.console.print(Panel.fit(banner, border_style=self._banner_border_style(), padding=(0, 1)))
 
     def _render_screen(self) -> None:
         os.system("cls")
@@ -429,6 +429,7 @@ class VynexVpnApp:
                     )
                 )
             if servers:
+                choices.append(Separator(" "))
                 choices.append(Choice(title="Обновить TCP ping у всех", value="__tcp_ping_all__"))
             choices.append(Choice(title="Быстрый импорт: сервер / подписка", value="__add__"))
             choices.append(Choice(title="Назад", value="__back__"))
@@ -533,6 +534,8 @@ class VynexVpnApp:
                         value=subscription.id,
                     )
                 )
+            if subscriptions:
+                choices.append(Separator(" "))
             choices.append(Choice(title="Быстрый импорт: сервер / подписка", value="__add__"))
             if subscriptions:
                 choices.append(Choice(title="Обновить все подписки", value="__refresh_all__"))
@@ -1785,75 +1788,96 @@ class VynexVpnApp:
             engine_name = self._backend_engine_name(backend.backend_id if backend is not None else None)
             engine_state_label = self._runtime_engine_state_label(RuntimeState(mode=default_mode))
             table = Table(show_header=False, box=None)
-            table.add_row("Версия", f"v{APP_VERSION}")
+            table.add_row("Версия", f"v{APP_VERSION}", style="dim")
             if self._available_app_update() is not None:
-                table.add_row("Обновление", self._available_app_update_label())
-            table.add_row("Режим по умолчанию", self._connection_mode_label(settings.connection_mode))
-            table.add_row("Ядро", "Не запущено")
-            table.add_row(f"Состояние {engine_name}", engine_state_label)
+                table.add_row("Обновление", self._available_app_update_label(), style="bold cyan")
+            table.add_row(
+                "Режим по умолчанию",
+                self._connection_mode_label(settings.connection_mode),
+                style=self._connection_mode_style(settings.connection_mode),
+            )
+            table.add_row("Ядро", "Не запущено", style="yellow")
+            table.add_row(
+                f"Состояние {engine_name}",
+                engine_state_label,
+                style=self._runtime_engine_state_style(RuntimeState(mode=default_mode)),
+            )
             table.add_row(
                 "Локальные порты",
-                "выдаются случайно на время подключения" if settings.connection_mode == "PROXY" else "не используются",
+                "выдаются случайно на время подключения" if settings.connection_mode == "PROXY" else "Не используются",
+                style="dim",
             )
             table.add_row(
                 "Системный proxy",
                 "Авто" if settings.connection_mode == "PROXY" and settings.set_system_proxy else "Выкл",
+                style="cyan" if settings.connection_mode == "PROXY" and settings.set_system_proxy else "dim",
             )
             table.add_row(
                 "Подписки при запуске",
-                "обновлять автоматически" if settings.auto_update_subscriptions_on_startup else "не обновлять",
+                "Обновлять автоматически" if settings.auto_update_subscriptions_on_startup else "Не обновлять",
+                style="cyan" if settings.auto_update_subscriptions_on_startup else "dim",
             )
             table.add_row(
                 "Маршрут",
                 self._active_routing_profile_name(),
+                style="bold cyan",
             )
             if settings.connection_mode == "TUN":
-                table.add_row("TUN", "нужны права администратора")
+                table.add_row("TUN", "Нужны права администратора", style="yellow")
             self._render_screen()
             self.console.print(
                 Panel.fit(
                     table,
                     title="Статус",
-                    border_style="yellow",
+                    border_style="cyan",
                 )
             )
             self._pause()
             return
         server = self.storage.get_server(state.server_id) if state.server_id else None
         table = Table(show_header=False, box=None)
-        table.add_row("Версия", f"v{APP_VERSION}")
+        table.add_row("Версия", f"v{APP_VERSION}", style="dim")
         if self._available_app_update() is not None:
-            table.add_row("Обновление", self._available_app_update_label())
-        table.add_row("Процесс", self._runtime_status_text(state))
-        table.add_row("PID", self._runtime_pid_label(state))
-        table.add_row("Режим", state.mode or "-")
-        table.add_row("Сервер", self._ui_server_name(server.name) if server else "-")
+            table.add_row("Обновление", self._available_app_update_label(), style="bold cyan")
+        table.add_row("Процесс", self._runtime_status_text(state), style=self._runtime_engine_state_style(state))
+        table.add_row("PID", self._runtime_pid_label(state), style="dim")
+        table.add_row("Режим", state.mode or "-", style=self._connection_mode_style(state.mode))
+        table.add_row("Сервер", self._ui_server_name(server.name) if server else "-", style="bold green" if server else None)
         table.add_row("Адрес", f"{server.host}:{server.port}" if server else "-")
         table.add_row("Протокол", server.protocol.upper() if server else "-")
-        table.add_row("Старт", state.started_at or "-")
+        table.add_row("Старт", state.started_at or "-", style="dim")
         table.add_row(
             "Routing",
             self._routing_display_name(
                 state.backend_id,
                 state.routing_profile_name or self._active_routing_profile_name(),
             ),
+            style="bold cyan",
         )
         if state.mode == "PROXY":
-            table.add_row("Ядро", self._backend_engine_name(state.backend_id))
-            table.add_row(f"Состояние {self._backend_engine_name(state.backend_id)}", self._runtime_engine_state_label(state))
-            table.add_row("Локальные порты", "скрыты")
-            table.add_row("SOCKS5", "защищен аутентификацией и не публикуется")
-            table.add_row("Системный proxy", "Да" if state.system_proxy_enabled else "Нет")
+            table.add_row("Ядро", self._backend_engine_name(state.backend_id), style="cyan")
+            table.add_row(
+                f"Состояние {self._backend_engine_name(state.backend_id)}",
+                self._runtime_engine_state_label(state),
+                style=self._runtime_engine_state_style(state),
+            )
+            table.add_row("Локальные порты", "скрыты", style="dim")
+            table.add_row("SOCKS5", "защищен аутентификацией и не публикуется", style="dim")
+            table.add_row("Системный proxy", "Да" if state.system_proxy_enabled else "Нет", style="cyan" if state.system_proxy_enabled else "dim")
         elif state.mode == "TUN":
-            table.add_row("Ядро", self._backend_engine_name(state.backend_id))
-            table.add_row(f"Состояние {self._backend_engine_name(state.backend_id)}", self._runtime_engine_state_label(state))
-            table.add_row("TUN", state.tun_interface_name or self._tun_interface_name(state.backend_id))
-            table.add_row("IPv4 TUN", state.tun_interface_ipv4 or "-")
-            table.add_row("Маршруты", ", ".join(state.tun_route_prefixes) if state.tun_route_prefixes else "-")
-            table.add_row("Внешний интерфейс", state.outbound_interface_name or "-")
-            table.add_row("Системный proxy", "Нет")
+            table.add_row("Ядро", self._backend_engine_name(state.backend_id), style="cyan")
+            table.add_row(
+                f"Состояние {self._backend_engine_name(state.backend_id)}",
+                self._runtime_engine_state_label(state),
+                style=self._runtime_engine_state_style(state),
+            )
+            table.add_row("TUN", state.tun_interface_name or self._tun_interface_name(state.backend_id), style="blue")
+            table.add_row("IPv4 TUN", state.tun_interface_ipv4 or "-", style="blue")
+            table.add_row("Маршруты", ", ".join(state.tun_route_prefixes) if state.tun_route_prefixes else "-", style="dim")
+            table.add_row("Внешний интерфейс", state.outbound_interface_name or "-", style="dim")
+            table.add_row("Системный proxy", "Нет", style="dim")
         self._render_screen()
-        self.console.print(Panel.fit(table, title="Статус подключения", border_style="cyan"))
+        self.console.print(Panel.fit(table, title="Статус подключения", border_style=self._banner_border_style()))
         self._pause()
 
     def _prompt_port(self, title: str, default: int) -> int:
@@ -2073,7 +2097,7 @@ class VynexVpnApp:
         state = self._current_state()
         settings = self._validated_settings(raise_on_error=False)
         mode_value = state.mode if state.is_running and state.mode else settings.connection_mode
-        mode_label = escape(self._connection_mode_short_label(mode_value))
+        mode_label = self._connection_mode_markup(mode_value)
         routing_source = self._routing_display_name(
             state.backend_id if state.is_running else None,
             state.routing_profile_name if state.is_running and state.routing_profile_name else self._active_routing_profile_name(),
@@ -2081,7 +2105,10 @@ class VynexVpnApp:
         routing_name = escape(self._shorten_text(routing_source, 28))
         update_suffix = ""
         if self._available_app_update() is not None:
-            update_suffix = f" | [bold yellow]Доступна новая версия:[/bold yellow] {escape(self._available_app_update_label())}"
+            update_suffix = (
+                f" | [bold cyan]Обновление:[/bold cyan] "
+                f"[bold yellow]{escape(self._available_app_update_label())}[/bold yellow]"
+            )
         if state.is_running:
             server = self.storage.get_server(state.server_id) if state.server_id else None
             server_name = escape(
@@ -2092,20 +2119,30 @@ class VynexVpnApp:
             )
             return (
                 f"[bold]Статус:[/bold] {self._runtime_status_markup(state)}"
-                f" | [bold]Сервер:[/bold] {server_name}"
+                f" | [bold]Сервер:[/bold] [white]{server_name}[/white]"
                 f" | [bold]Режим:[/bold] {mode_label}"
-                f" | [bold]Маршрут:[/bold] {routing_name}"
+                f" | [bold]Маршрут:[/bold] [cyan]{routing_name}[/cyan]"
                 f"{update_suffix}"
             )
         return (
             "[bold]Статус:[/bold] [yellow]Не подключено[/yellow]"
             f" | [bold]Режим:[/bold] {mode_label}"
-            f" | [bold]Маршрут:[/bold] {routing_name}"
+            f" | [bold]Маршрут:[/bold] [cyan]{routing_name}[/cyan]"
             f"{update_suffix}"
         )
 
     def _banner_border_style(self) -> str:
         return "green" if self._current_state().is_running else "cyan"
+
+    @staticmethod
+    def _connection_mode_style(value: str | None) -> str:
+        return "bold blue" if str(value or "").upper() == "TUN" else "bold cyan"
+
+    @classmethod
+    def _connection_mode_markup(cls, value: str | None) -> str:
+        label = escape(cls._connection_mode_short_label(value or "PROXY"))
+        style = cls._connection_mode_style(value)
+        return f"[{style}]{label}[/]"
 
     def _runtime_status_markup(self, state: RuntimeState) -> str:
         if not state.is_running:
@@ -2150,6 +2187,18 @@ class VynexVpnApp:
                 return "Сбой"
             return "Сбой, идет восстановление"
         return "Работает" if state.is_running else "Остановлено"
+
+    def _runtime_engine_state_style(self, state: RuntimeState) -> str:
+        backend_state = self._backend_process_state(state)
+        if backend_state == XrayState.STARTING:
+            return "cyan"
+        if backend_state == XrayState.RUNNING:
+            return "bold green"
+        if backend_state == XrayState.STOPPING:
+            return "yellow"
+        if backend_state == XrayState.CRASHED:
+            return "bold red" if not self._backend_supports_crash_recovery(state) else "yellow"
+        return "dim"
 
     def _runtime_pid_label(self, state: RuntimeState) -> str:
         if str(state.mode or "").upper() in {"PROXY", "TUN"}:
@@ -3038,9 +3087,25 @@ class VynexVpnApp:
                 f"{server.host}:{server.port}",
                 self._tcp_ping_status_label(result),
                 self._tcp_ping_result_label(result),
-                style="bold green" if server.id == best_server_id else None,
+                style=self._tcp_ping_row_style(
+                    result,
+                    is_best=server.id == best_server_id,
+                    is_active=server.id == active_server_id,
+                ),
             )
         return table
+
+    @staticmethod
+    def _tcp_ping_row_style(result: TcpPingResult, *, is_best: bool, is_active: bool) -> str | None:
+        if is_best:
+            return "bold green"
+        if is_active and result.ok:
+            return "bold cyan"
+        if result.ok:
+            return "green"
+        if is_tcp_ping_unsupported_result(result):
+            return "yellow"
+        return "red"
 
     @staticmethod
     def _tcp_ping_status_label(result: TcpPingResult) -> str:
@@ -3084,6 +3149,7 @@ class VynexVpnApp:
                 self._server_source_label(server),
                 self._server_status_label(server, active_server_id=active_server_id),
                 self._cached_tcp_ping_label(server),
+                style=self._server_row_style(server, active_server_id=active_server_id),
             )
         return table
 
@@ -3099,6 +3165,8 @@ class VynexVpnApp:
         *,
         parent_subscription: SubscriptionEntry | None = None,
     ) -> Panel:
+        current_state = self._current_state()
+        active_server_id = current_state.server_id if current_state.is_running else None
         table = Table(show_header=False, box=None, pad_edge=False)
         table.add_column("Параметр", no_wrap=True, style="bold")
         table.add_column("Значение", overflow="fold", max_width=max(34, self.console.width - 34))
@@ -3106,24 +3174,24 @@ class VynexVpnApp:
         table.add_row("Протокол", server.protocol.upper())
         table.add_row("Адрес", f"{server.host}:{server.port}")
         if server.is_amneziawg:
-            table.add_row("Профиль", "AmneziaWG")
-        table.add_row("Источник", self._server_source_label(server))
-        table.add_row("Статус", self._server_status_label(server, active_server_id=self._current_state().server_id))
-        table.add_row("Создан", self._shorten_text(server.created_at, 19))
+            table.add_row("Профиль", "AmneziaWG", style="blue")
+        table.add_row("Источник", self._server_source_label(server), style="dim")
+        table.add_row("Статус", self._server_status_label(server, active_server_id=active_server_id), style=self._server_row_style(server, active_server_id=active_server_id))
+        table.add_row("Создан", self._shorten_text(server.created_at, 19), style="dim")
         if "tcp_ping_checked_at" in server.extra:
-            table.add_row("TCP ping", self._cached_tcp_ping_label(server))
-            table.add_row("Проверено", self._shorten_text(str(server.extra.get("tcp_ping_checked_at") or "-"), 19))
+            table.add_row("TCP ping", self._cached_tcp_ping_label(server), style=self._server_ping_style(server))
+            table.add_row("Проверено", self._shorten_text(str(server.extra.get("tcp_ping_checked_at") or "-"), 19), style="dim")
         if parent_subscription is not None:
-            table.add_row("Подписка", self._ui_subscription_title(parent_subscription.title))
+            table.add_row("Подписка", self._ui_subscription_title(parent_subscription.title), style="cyan")
         if server.source == "subscription":
             note = "После обновления подписки параметры сервера могут измениться."
             if server.extra.get("stale"):
                 note = "Сервер исчез из последней версии подписки и сохранен как устаревший."
-            table.add_row("Примечание", note)
+            table.add_row("Примечание", note, style="yellow" if server.extra.get("stale") else "dim")
         return Panel.fit(
             table,
             title=f"Сервер: {self._ui_server_name(server.name)}",
-            border_style="cyan" if server.source == "manual" else "yellow",
+            border_style=self._server_panel_border_style(server, active_server_id=active_server_id),
         )
 
     def _server_source_label(self, server: ServerEntry) -> str:
@@ -3136,13 +3204,6 @@ class VynexVpnApp:
             return "подписка"
         return server.source
 
-    def _server_source_short_label(self, server: ServerEntry) -> str:
-        if server.source == "manual":
-            return "ручной"
-        if server.source == "subscription":
-            return "подписка"
-        return server.source
-
     @staticmethod
     def _server_status_label(server: ServerEntry, *, active_server_id: str | None) -> str:
         if server.id == active_server_id:
@@ -3150,6 +3211,36 @@ class VynexVpnApp:
         if server.extra.get("stale"):
             return "Устарел"
         return "Ожидание"
+
+    def _server_row_style(self, server: ServerEntry, *, active_server_id: str | None) -> str | None:
+        if server.id == active_server_id:
+            return "bold green"
+        if server.extra.get("stale"):
+            return "yellow"
+        ping_style = self._server_ping_style(server)
+        if ping_style == "red":
+            return ping_style
+        return None
+
+    def _server_ping_style(self, server: ServerEntry) -> str | None:
+        if server.extra.get("tcp_ping_ok") and server.extra.get("tcp_ping_ms") is not None:
+            return "green"
+        error = str(server.extra.get("tcp_ping_error") or "").strip()
+        if not error:
+            return None
+        if error == TCP_PING_UNSUPPORTED_ERROR:
+            return "yellow"
+        return "red"
+
+    def _server_panel_border_style(self, server: ServerEntry, *, active_server_id: str | None) -> str:
+        if server.id == active_server_id:
+            return "green"
+        if server.extra.get("stale"):
+            return "yellow"
+        ping_style = self._server_ping_style(server)
+        if ping_style in {"green", "yellow", "red"}:
+            return ping_style
+        return "cyan"
 
     @staticmethod
     def _sorted_servers(servers: list[ServerEntry]) -> list[ServerEntry]:
@@ -3210,6 +3301,7 @@ class VynexVpnApp:
                 str(len(self._subscription_servers(subscription.id))),
                 self._shorten_text(subscription.updated_at, 19),
                 self._subscription_status_label(subscription),
+                style=self._subscription_row_style(subscription),
             )
         return table
 
@@ -3226,22 +3318,37 @@ class VynexVpnApp:
             return "Пусто"
         return "OK"
 
+    def _subscription_row_style(self, subscription: SubscriptionEntry) -> str:
+        if subscription.last_error:
+            return "bold red"
+        if not self._subscription_servers(subscription.id):
+            return "yellow"
+        return "green"
+
+    def _subscription_panel_border_style(self, subscription: SubscriptionEntry) -> str:
+        if subscription.last_error:
+            return "red"
+        if not self._subscription_servers(subscription.id):
+            return "yellow"
+        return "cyan"
+
     def _subscription_details_panel(self, subscription: SubscriptionEntry) -> Panel:
+        subscription_servers = self._subscription_servers(subscription.id)
         table = Table(show_header=False, box=None, pad_edge=False)
         table.add_column("Параметр", no_wrap=True, style="bold")
         table.add_column("Значение", overflow="fold", max_width=max(34, self.console.width - 34))
         table.add_row("Название", self._ui_subscription_title(subscription.title))
         table.add_row("URL", subscription.url)
-        table.add_row("Серверов", str(len(self._subscription_servers(subscription.id))))
-        table.add_row("Обновлено", self._shorten_text(subscription.updated_at, 19))
-        table.add_row("Статус", self._subscription_status_label(subscription))
+        table.add_row("Серверов", str(len(subscription_servers)), style="green" if subscription_servers else "yellow")
+        table.add_row("Обновлено", self._shorten_text(subscription.updated_at, 19), style="dim")
+        table.add_row("Статус", self._subscription_status_label(subscription), style=self._subscription_row_style(subscription))
         if subscription.last_error:
-            table.add_row("Последняя ошибка", subscription.last_error)
-            table.add_row("Когда", self._shorten_text(subscription.last_error_at or "-", 19))
+            table.add_row("Последняя ошибка", subscription.last_error, style="red")
+            table.add_row("Когда", self._shorten_text(subscription.last_error_at or "-", 19), style="dim")
         return Panel.fit(
             table,
             title=f"Подписка: {self._ui_subscription_title(subscription.title)}",
-            border_style="yellow" if subscription.last_error else "cyan",
+            border_style=self._subscription_panel_border_style(subscription),
         )
 
     def _subscription_servers(self, subscription_id: str) -> list[ServerEntry]:
@@ -3321,11 +3428,11 @@ class VynexVpnApp:
         table.add_row("Режим подключения", self._connection_mode_label(settings.connection_mode))
         table.add_row(
             "Локальные порты",
-            "случайные и скрыты для каждой сессии" if settings.connection_mode == "PROXY" else "не используются",
+            "случайные и скрыты для каждой сессии" if settings.connection_mode == "PROXY" else "Не используются",
         )
         table.add_row(
             "SOCKS5",
-            "включается только с аутентификацией" if settings.connection_mode == "PROXY" else "не используется",
+            "включается только с аутентификацией" if settings.connection_mode == "PROXY" else "Не используется",
         )
         table.add_row(
             "Системный proxy",
@@ -3337,7 +3444,7 @@ class VynexVpnApp:
         )
         table.add_row(
             "Подписки при запуске",
-            "обновлять автоматически" if settings.auto_update_subscriptions_on_startup else "не обновлять",
+            "Обновлять автоматически" if settings.auto_update_subscriptions_on_startup else "не обновлять",
         )
         table.add_row(
             "Маршрут",
@@ -3856,6 +3963,7 @@ class VynexVpnApp:
     def _menu_select_style(base_style: Style | None = None) -> Style:
         style_rules = list(base_style.style_rules) if base_style is not None else []
         style_rules.append(("terminal-danger", "fg:ansired bold"))
+        style_rules.append(("instruction", "fg:ansicyan"))
         return Style(style_rules)
 
     @staticmethod
@@ -4077,11 +4185,11 @@ class VynexVpnApp:
 
     @staticmethod
     def _server_manager_instruction() -> str:
-        return "Enter открыть, Del удалить, E редактировать, R обновить ping, / фильтр, Esc назад"
+        return "Enter - открыть, Del - удалить, E - редактировать, R - обновить ping, / - фильтр, Esc - назад"
 
     @staticmethod
     def _subscription_manager_instruction() -> str:
-        return "Enter открыть, Del удалить, E редактировать, R обновить, / фильтр, Esc назад"
+        return "Enter - открыть, Del - удалить, E - редактировать, R - обновить, / - фильтр, Esc - назад"
 
     @staticmethod
     def _subscription_default_title(url: str) -> str:
