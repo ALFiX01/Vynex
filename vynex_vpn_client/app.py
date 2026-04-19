@@ -1237,7 +1237,7 @@ class VynexVpnApp:
                     "Обновить",
                     "Изменить название",
                     "Изменить URL",
-                    "Показать серверы подписки",
+                    "Показать сервера подписки",
                     "Удалить подписку",
                     "Назад",
                 ],
@@ -1253,7 +1253,7 @@ class VynexVpnApp:
                     self._rename_subscription_flow(subscription)
                 elif selected_action == "Изменить URL":
                     self._edit_subscription_url_flow(subscription)
-                elif selected_action == "Показать серверы подписки":
+                elif selected_action == "Показать сервера подписки":
                     self._show_subscription_servers(subscription)
                 elif selected_action == "Удалить подписку":
                     if self._delete_subscription_flow(subscription):
@@ -1332,7 +1332,7 @@ class VynexVpnApp:
             )
             self._pause()
             return
-        table = Table(title=f"Серверы подписки: {self._ui_subscription_title(subscription.title)}")
+        table = Table(title=f"Сервера подписки: {self._ui_subscription_title(subscription.title)}")
         table.add_column("Имя", overflow="fold", max_width=max(20, self.console.width - 62))
         table.add_column("Протокол", no_wrap=True)
         table.add_column("Адрес", no_wrap=True)
@@ -1351,11 +1351,11 @@ class VynexVpnApp:
             "Как удалить подписку?",
             choices=[
                 Choice(
-                    title=f"Удалить подписку и ее серверы ({len(servers)})",
+                    title=f"Удалить подписку и ее сервера ({len(servers)})",
                     value="remove",
                 ),
                 Choice(
-                    title=f"Удалить подписку, серверы оставить как ручные ({len(servers)})",
+                    title=f"Удалить подписку, сервера оставить как ручные ({len(servers)})",
                     value="detach",
                 ),
                 Choice(title="Назад", value="back"),
@@ -1378,7 +1378,7 @@ class VynexVpnApp:
                 return False
             self._disconnect_runtime(silent=True)
 
-        action_text = "удалить подписку и ее серверы" if remove_servers else "удалить подписку и отвязать серверы"
+        action_text = "удалить подписку и ее сервера" if remove_servers else "удалить подписку и отвязать сервера"
         self._render_screen()
         should_delete = questionary.confirm(
             f"Подтвердите: {action_text} '{self._ui_subscription_title(subscription.title)}'?",
@@ -2365,7 +2365,7 @@ class VynexVpnApp:
                 )
             if "windows не применила dns" in normalized:
                 return (
-                    "AmneziaWG поднял интерфейс, но DNS серверы из профиля не были применены в Windows.",
+                    "AmneziaWG поднял интерфейс, но DNS сервера из профиля не были применены в Windows.",
                     [
                         "Проверьте поле `DNS` в AWG-конфиге.",
                         "Если у вас включены сторонние DNS-клиенты или endpoint security, временно отключите их и повторите попытку.",
@@ -2899,7 +2899,7 @@ class VynexVpnApp:
 
     def _servers_table(self, servers: list[ServerEntry], *, active_server_id: str | None) -> Table:
         name_width = self._server_name_display_width(min_width=18, reserved_width=96)
-        table = Table(title="Серверы")
+        table = Table(title="Сервера")
         table.add_column("Имя", no_wrap=True, overflow="ellipsis", max_width=name_width)
         table.add_column("Протокол", no_wrap=True)
         table.add_column("Адрес", no_wrap=True)

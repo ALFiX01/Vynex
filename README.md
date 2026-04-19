@@ -2,7 +2,7 @@
 
 **Современный VPN-клиент для Windows 10/11 с терминальным интерфейсом, быстрым импортом конфигов и управлением подключением через Xray и AmneziaWG.**
 
-Vynex помогает быстро перейти от ссылки или конфига к рабочему подключению: импортирует серверы и подписки, сам подтягивает runtime-компоненты, умеет работать в режимах `PROXY` и `TUN`, хранит состояние локально и поддерживает self-update для packaged Windows-сборки.
+Vynex помогает быстро перейти от ссылки или конфига к рабочему подключению: импортирует сервера и подписки, сам подтягивает runtime-компоненты, умеет работать в режимах `PROXY` и `TUN`, хранит состояние локально и поддерживает self-update для packaged Windows-сборки.
 
 <p align="center">
   <a href="https://github.com/ALFiX01/Vynex/releases/latest"><img src="https://img.shields.io/github/v/release/ALFiX01/Vynex?style=flat-square" alt="Latest Release"></a>
@@ -191,7 +191,7 @@ Vynex умеет распознавать:
 
 Нет. Текущая реализация backend `AmneziaWG` поддерживает только `TUN`.
 
-### Где хранятся серверы и подписки?
+### Где хранятся сервера и подписки?
 
 В `%LOCALAPPDATA%\VynexVPNClient\data\`, включая `servers.json`, `subscriptions.json`, `settings.json` и `runtime_state.json`.
 

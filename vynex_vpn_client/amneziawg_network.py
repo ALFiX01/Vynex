@@ -110,13 +110,13 @@ class AmneziaWgWindowsNetworkIntegration:
         if expected.dns_required:
             if not actual_dns:
                 raise AmneziaWgDnsApplyError(
-                    "AmneziaWG поднял интерфейс, но Windows не применила DNS серверы из профиля."
+                    "AmneziaWG поднял интерфейс, но Windows не применила DNS сервера из профиля."
                 )
             if expected.dns_servers and expected.require_exact_dns_match:
                 missing_dns = [server for server in expected.dns_servers if server not in set(actual_dns)]
                 if missing_dns:
                     raise AmneziaWgDnsApplyError(
-                        "AmneziaWG поднял интерфейс, но Windows не применила DNS серверы: "
+                        "AmneziaWG поднял интерфейс, но Windows не применила DNS сервера: "
                         + ", ".join(missing_dns)
                     )
 
