@@ -157,7 +157,7 @@ def test_banner_status_line_uses_awg_config_routing_label() -> None:
 
     line = app._banner_status_line()
 
-    assert "из AWG-конфига" in line
+    assert "AWG-конфиг" in line
     assert "Умный" not in line
     assert "TUN" in line
 

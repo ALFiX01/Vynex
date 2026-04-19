@@ -154,7 +154,41 @@ class JsonStorage:
         self._write_json(SERVERS_FILE, [server.to_dict() for server in servers])
 
     def upsert_server(self, server: ServerEntry) -> ServerEntry:
-        servers = self.load_servers()
+        saved_servers = self.upsert_servers([server])
+        return saved_servers[0]
+
+    def upsert_servers(
+        self,
+        incoming_servers: list[ServerEntry],
+        *,
+        existing_servers: list[ServerEntry] | None = None,
+        save: bool = True,
+        continue_on_error: bool = False,
+    ) -> list[ServerEntry]:
+        if not incoming_servers:
+            return []
+
+        servers = existing_servers if existing_servers is not None else self.load_servers()
+        saved_servers: list[ServerEntry] = []
+
+        for server in incoming_servers:
+            try:
+                saved_server = self._upsert_server_in_collection(servers, server)
+            except ValueError:
+                if continue_on_error:
+                    continue
+                raise
+            saved_servers.append(saved_server)
+
+        if save and saved_servers:
+            self.save_servers(servers)
+        return saved_servers
+
+    def _upsert_server_in_collection(
+        self,
+        servers: list[ServerEntry],
+        server: ServerEntry,
+    ) -> ServerEntry:
         for index, existing in enumerate(servers):
             if existing.id == server.id:
                 if any(
@@ -164,7 +198,6 @@ class JsonStorage:
                     raise ValueError("Сервер с такой ссылкой уже существует.")
                 server.created_at = existing.created_at
                 servers[index] = server
-                self.save_servers(servers)
                 return server
         if server.is_amneziawg:
             for index, existing in enumerate(servers):
@@ -173,7 +206,6 @@ class JsonStorage:
                 server.id = existing.id
                 server.created_at = existing.created_at
                 servers[index] = server
-                self.save_servers(servers)
                 return server
         if server.raw_link:
             for index, existing in enumerate(servers):
@@ -181,10 +213,8 @@ class JsonStorage:
                     server.id = existing.id
                     server.created_at = existing.created_at
                     servers[index] = server
-                    self.save_servers(servers)
                     return server
         servers.append(server)
-        self.save_servers(servers)
         return server
 
     def get_server(self, server_id: str) -> ServerEntry | None:

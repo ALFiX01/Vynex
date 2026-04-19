@@ -83,8 +83,7 @@ def test_wait_for_tun_ready_returns_interface_details() -> None:
     )
 
     with (
-        patch("vynex_vpn_client.app.wait_for_tun_interface", return_value=True),
-        patch("vynex_vpn_client.app.get_interface_details", return_value=details),
+        patch("vynex_vpn_client.app.wait_for_tun_interface_details", return_value=details),
     ):
         assert app._wait_for_tun_ready(pid=1234) == details
 
@@ -94,7 +93,7 @@ def test_wait_for_tun_ready_reports_recent_output_when_xray_exits() -> None:
     app.process_manager.is_running.return_value = False
     app.process_manager.read_recent_output.return_value = "failed to initialize wintun"
 
-    with patch("vynex_vpn_client.app.wait_for_tun_interface", return_value=False):
+    with patch("vynex_vpn_client.app.wait_for_tun_interface_details", return_value=None):
         try:
             app._wait_for_tun_ready(pid=1234)
         except RuntimeError as exc:

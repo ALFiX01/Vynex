@@ -183,14 +183,8 @@ def test_subscription_manager_updates_subscription_server_ids_with_stale_entries
     fresh = [
         _make_server("New", extra={"id": "id-1"}),
     ]
-    saved: list[ServerEntry] = []
-
-    def _upsert(server: ServerEntry) -> ServerEntry:
-        saved.append(server)
-        return server
-
     storage.load_servers.return_value = old
-    storage.upsert_server.side_effect = _upsert
+    storage.upsert_servers.side_effect = lambda servers, **kwargs: list(servers)
     manager = SubscriptionManager(storage)
 
     imported = manager.import_subscription_servers(subscription, fresh)
@@ -198,6 +192,10 @@ def test_subscription_manager_updates_subscription_server_ids_with_stale_entries
     assert len(imported) == 2
     assert len(subscription.server_ids) == 2
     assert any(server.extra.get("stale") for server in imported)
+    storage.load_servers.assert_called_once_with()
+    storage.upsert_servers.assert_called_once()
+    storage.upsert_server.assert_not_called()
+    storage.save_servers.assert_called_once_with(old)
 
 
 def test_refresh_all_only_updates_auto_update_subscriptions() -> None:

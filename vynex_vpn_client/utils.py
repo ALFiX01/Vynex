@@ -349,16 +349,46 @@ def get_interface_details(
 
 
 def is_tun_interface_ready(interface_name: str, *, require_route: bool = False) -> bool:
+    details = _ready_tun_interface_details(interface_name, require_route=require_route)
+    return details is not None
+
+
+def wait_for_tun_interface_details(
+    interface_name: str,
+    *,
+    timeout: float = 12.0,
+    interval: float = 0.2,
+    require_route: bool = False,
+) -> WindowsInterfaceDetails | None:
+    deadline = time.monotonic() + timeout
+    poll_interval = max(0.05, float(interval))
+    while True:
+        details = _ready_tun_interface_details(interface_name, require_route=require_route)
+        if details is not None:
+            return details
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(poll_interval, remaining))
+        poll_interval = min(poll_interval * 1.5, 0.75)
+    return _ready_tun_interface_details(interface_name, require_route=require_route)
+
+
+def _ready_tun_interface_details(
+    interface_name: str,
+    *,
+    require_route: bool,
+) -> WindowsInterfaceDetails | None:
     details = get_interface_details(interface_name, allow_link_local=True)
     if details is None:
-        return False
+        return None
     if str(details.status or "").lower() != "up":
-        return False
+        return None
     if not details.ipv4:
-        return False
+        return None
     if require_route and not details.has_route:
-        return False
-    return True
+        return None
+    return details
 
 
 def wait_for_tun_interface(
@@ -368,12 +398,15 @@ def wait_for_tun_interface(
     interval: float = 0.2,
     require_route: bool = False,
 ) -> bool:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if is_tun_interface_ready(interface_name, require_route=require_route):
-            return True
-        time.sleep(interval)
-    return is_tun_interface_ready(interface_name, require_route=require_route)
+    return (
+        wait_for_tun_interface_details(
+            interface_name,
+            timeout=timeout,
+            interval=interval,
+            require_route=require_route,
+        )
+        is not None
+    )
 
 
 def add_ipv4_route(

@@ -96,7 +96,7 @@ if __package__ in {None, ""}:
         remove_ipv4_route,
         terminate_running_processes,
         wait_for_port_listener,
-        wait_for_tun_interface,
+        wait_for_tun_interface_details,
     )
     from vynex_vpn_client.tcp_ping import (
         TcpPingResult,
@@ -173,7 +173,7 @@ else:
         remove_ipv4_route,
         terminate_running_processes,
         wait_for_port_listener,
-        wait_for_tun_interface,
+        wait_for_tun_interface_details,
     )
 
 FLAG_EMOJI_PATTERN = re.compile(r"[\U0001F1E6-\U0001F1FF]{2}")
@@ -1214,11 +1214,8 @@ class VynexVpnApp:
     def _import_server_links(self, links: list[ServerEntry]) -> list[ServerEntry]:
         imported: list[ServerEntry] = []
         imported_ids: set[str] = set()
-        for server_entry in links:
-            try:
-                server = self.storage.upsert_server(server_entry)
-            except ValueError:
-                continue
+        stored_servers = self.storage.upsert_servers(links, continue_on_error=True)
+        for server in stored_servers:
             if server.id in imported_ids:
                 continue
             imported.append(server)
@@ -1919,7 +1916,7 @@ class VynexVpnApp:
     @staticmethod
     def _routing_display_name(backend_id: str | None, routing_name: str | None) -> str:
         if backend_id == "amneziawg":
-            return "из AWG-конфига"
+            return "AWG-конфиг"
         normalized = str(routing_name or "").strip()
         return normalized or "-"
 
@@ -3358,13 +3355,9 @@ class VynexVpnApp:
     ) -> WindowsInterfaceDetails:
         backend_id = backend.backend_id if backend is not None else None
         tun_interface_name = tun_interface_name or self._tun_interface_name(backend_id)
-        if wait_for_tun_interface(tun_interface_name, timeout=12.0):
-            details = get_interface_details(
-                tun_interface_name,
-                allow_link_local=True,
-            )
-            if details is not None and details.ipv4:
-                return details
+        details = wait_for_tun_interface_details(tun_interface_name, timeout=12.0)
+        if details is not None:
+            return details
         manager = self._process_manager_for_mode("TUN", backend_id=backend_id)
         if not manager.is_running(pid):
             raise RuntimeError(

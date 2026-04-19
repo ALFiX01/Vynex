@@ -13,6 +13,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+import psutil
+
 from .constants import (
     AMNEZIAWG_LEGACY_RUNTIME_DIR,
     AMNEZIAWG_RUNTIME_DIR,
@@ -222,6 +224,7 @@ class AmneziaWgProcessManager:
             )
 
         deadline = time.monotonic() + launch_config.startup_timeout
+        poll_interval = self.STARTUP_POLL_INTERVAL
         while time.monotonic() < deadline:
             running_pid = self._discover_service_pid()
             if running_pid is not None and self._healthcheck_ready(launch_config):
@@ -229,7 +232,11 @@ class AmneziaWgProcessManager:
                     self._active_pid = running_pid
                 self._set_state(State.RUNNING)
                 return running_pid
-            time.sleep(self.STARTUP_POLL_INTERVAL)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(poll_interval, remaining))
+            poll_interval = min(poll_interval * 1.5, 0.75)
 
         self._logger.error(
             "AmneziaWG tunnel '%s' did not pass startup health-check within %.1fs",
@@ -468,10 +475,31 @@ class AmneziaWgProcessManager:
         return str(details.status or "").lower() == "up"
 
     def _discover_service_pid(self) -> int | None:
+        fast_pid = self._discover_service_pid_fast()
+        if fast_pid is not None:
+            return fast_pid
         target_paths = {self._normalize_path(str(path)) for path in self._iter_executable_candidates()}
         for instance in self.list_running_instances():
             if instance.executable_path in target_paths:
                 return instance.pid
+        return None
+
+    def _discover_service_pid_fast(self) -> int | None:
+        target_names = {name.lower() for name in self._candidate_file_names()}
+        target_paths = {self._normalize_path(str(path)) for path in self._iter_executable_candidates()}
+        try:
+            for process in psutil.process_iter(["pid", "name", "exe"]):
+                try:
+                    process_name = str(process.info.get("name") or "").strip().lower()
+                    if not process_name or process_name not in target_names:
+                        continue
+                    executable_path = self._normalize_path(str(process.info.get("exe") or "").strip() or None)
+                    if executable_path in target_paths:
+                        return int(process.info["pid"])
+                except (KeyError, TypeError, ValueError, psutil.Error, OSError):
+                    continue
+        except (psutil.AccessDenied, OSError):
+            return None
         return None
 
     def _register_process(self, process: subprocess.Popen[str]) -> None:

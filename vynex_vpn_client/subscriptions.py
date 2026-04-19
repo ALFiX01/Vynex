@@ -25,13 +25,17 @@ class SubscriptionManager:
         if not servers:
             raise ValueError("Не удалось импортировать ни один сервер из подписки.")
 
-        current_servers = self._load_subscription_servers(subscription.id)
+        all_servers = self.storage.load_servers()
+        current_servers = [
+            server
+            for server in all_servers
+            if server.source == "subscription" and server.subscription_id == subscription.id
+        ]
         merged = merge_subscription_servers(current_servers, servers)
+        stored_servers = self.storage.upsert_servers(merged, existing_servers=all_servers, save=False)
         saved_servers: list[ServerEntry] = []
         saved_ids: set[str] = set()
-
-        for server in merged:
-            saved_server = self.storage.upsert_server(server)
+        for saved_server in stored_servers:
             if saved_server.id in saved_ids:
                 continue
             saved_servers.append(saved_server)
@@ -41,7 +45,16 @@ class SubscriptionManager:
         subscription.server_ids = [item.id for item in saved_servers]
         orphan_ids = previous_server_ids - saved_ids
         if orphan_ids:
-            self.storage.remove_servers_by_ids(orphan_ids, subscription_id=subscription.id)
+            all_servers[:] = [
+                server
+                for server in all_servers
+                if not (
+                    server.id in orphan_ids
+                    and server.source == "subscription"
+                    and server.subscription_id == subscription.id
+                )
+            ]
+        self.storage.save_servers(all_servers)
         return saved_servers
 
     def refresh_all(
@@ -96,13 +109,6 @@ class SubscriptionManager:
         )
         response.raise_for_status()
         return response.text.strip()
-
-    def _load_subscription_servers(self, subscription_id: str) -> list[ServerEntry]:
-        return [
-            server
-            for server in self.storage.load_servers()
-            if server.source == "subscription" and server.subscription_id == subscription_id
-        ]
 
     @staticmethod
     def summarize_protocols(servers: Iterable[ServerEntry]) -> dict[str, int]:

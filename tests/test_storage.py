@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
 import vynex_vpn_client.storage as storage_module
-from vynex_vpn_client.models import AppSettings, RuntimeState
+from vynex_vpn_client.models import AppSettings, RuntimeState, ServerEntry
 from vynex_vpn_client.storage import JsonStorage, StorageCorruptionError
 
 
@@ -19,6 +20,17 @@ def _configure_storage_paths(tmp_path: Path, monkeypatch) -> Path:
     monkeypatch.setattr(storage_module, "RUNTIME_STATE_FILE", data_dir / "runtime_state.json")
     monkeypatch.setattr(storage_module, "SETTINGS_FILE", data_dir / "settings.json")
     return data_dir
+
+
+def _make_server(name: str, *, host: str, port: int, raw_link: str) -> ServerEntry:
+    return ServerEntry.new(
+        name=name,
+        protocol="vless",
+        host=host,
+        port=port,
+        raw_link=raw_link,
+        extra={"id": f"id-{name.lower()}"},
+    )
 
 
 def test_load_runtime_state_restores_from_backup_after_corruption(tmp_path: Path, monkeypatch) -> None:
@@ -63,3 +75,31 @@ def test_settings_persist_auto_update_subscriptions_on_startup(tmp_path: Path, m
     storage.save_settings(updated)
 
     assert storage.load_settings() == updated
+
+
+def test_upsert_servers_loads_and_saves_once_for_batch_import(tmp_path: Path, monkeypatch) -> None:
+    _configure_storage_paths(tmp_path, monkeypatch)
+    storage = JsonStorage()
+    first = _make_server(
+        "One",
+        host="one.example.com",
+        port=443,
+        raw_link="vless://id-1@one.example.com:443#One",
+    )
+    second = _make_server(
+        "Two",
+        host="two.example.com",
+        port=8443,
+        raw_link="vless://id-2@two.example.com:8443#Two",
+    )
+
+    with (
+        patch.object(storage, "load_servers", wraps=storage.load_servers) as load_servers,
+        patch.object(storage, "save_servers", wraps=storage.save_servers) as save_servers,
+    ):
+        saved = storage.upsert_servers([first, second])
+
+    assert [server.name for server in saved] == ["One", "Two"]
+    assert load_servers.call_count == 1
+    assert save_servers.call_count == 1
+    assert [server.name for server in storage.load_servers()] == ["One", "Two"]
