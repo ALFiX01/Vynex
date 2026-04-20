@@ -135,7 +135,7 @@ def terminate_running_processes(
             continue
         pending_processes.append(process)
 
-    gone, alive = psutil.wait_procs(pending_processes, timeout=max(timeout, 0.0))
+    gone, alive = _wait_for_processes(pending_processes, timeout=max(timeout, 0.0))
     del gone
     retry_processes: list[psutil.Process] = []
     for process in alive:
@@ -148,11 +148,50 @@ def terminate_running_processes(
             continue
         retry_processes.append(process)
 
-    _, still_alive = psutil.wait_procs(retry_processes, timeout=max(kill_timeout, 0.0))
+    _, still_alive = _wait_for_processes(retry_processes, timeout=max(kill_timeout, 0.0))
     for process in still_alive:
         failed_by_pid[process.pid] = process_info_by_pid[process.pid]
 
     return sorted(failed_by_pid.values(), key=lambda item: (item.name.casefold(), item.pid))
+
+
+def _wait_for_processes(
+    processes: list[psutil.Process] | tuple[psutil.Process, ...],
+    *,
+    timeout: float,
+    poll_interval: float = 0.1,
+) -> tuple[list[psutil.Process], list[psutil.Process]]:
+    if not processes:
+        return [], []
+
+    deadline = time.monotonic() + max(timeout, 0.0)
+    gone: list[psutil.Process] = []
+    alive = list(processes)
+
+    while True:
+        timed_out: list[psutil.Process] = []
+        inaccessible: list[psutil.Process] = []
+        for process in alive:
+            try:
+                process.wait(timeout=0)
+            except psutil.TimeoutExpired:
+                timed_out.append(process)
+            except psutil.NoSuchProcess:
+                gone.append(process)
+            except (psutil.AccessDenied, psutil.ZombieProcess, OSError):
+                inaccessible.append(process)
+            else:
+                gone.append(process)
+
+        if not timed_out:
+            return gone, inaccessible
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return gone, timed_out + inaccessible
+
+        time.sleep(min(poll_interval, remaining))
+        alive = timed_out
 
 
 def is_port_available(port: int, host: str = LOCAL_PROXY_HOST) -> bool:
