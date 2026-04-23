@@ -787,7 +787,19 @@ class AmneziaWgProcessManager:
         except subprocess.TimeoutExpired:
             self._logger.warning("Timed out while cleaning up AmneziaWG tunnel service '%s'", tunnel_name)
             return
-        except OSError:
+        except PermissionError:
+            self._logger.warning(
+                "Access denied while cleaning up AmneziaWG tunnel service '%s'",
+                tunnel_name,
+            )
+            return
+        except OSError as exc:
+            if self._is_permission_error(exc):
+                self._logger.warning(
+                    "Access denied while cleaning up AmneziaWG tunnel service '%s'",
+                    tunnel_name,
+                )
+                return
             self._logger.exception("Failed to invoke AmneziaWG cleanup for tunnel '%s'", tunnel_name)
             return
         if result.returncode == 0:

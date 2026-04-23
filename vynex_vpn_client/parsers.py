@@ -49,8 +49,26 @@ def _normalize_uri_candidate(value: str) -> str:
     return normalized
 
 
+def _count_supported_share_prefixes(value: str) -> int:
+    lowered = value.lower()
+    return sum(lowered.count(prefix) for prefix in SUPPORTED_SHARE_LINK_PREFIXES)
+
+
+def _normalize_share_link_candidate(value: str) -> str:
+    normalized = _normalize_uri_candidate(value)
+    lines = [_normalize_uri_candidate(raw_line) for raw_line in normalized.splitlines()]
+    lines = [line for line in lines if line and not line.startswith("#")]
+    if (
+        len(lines) > 1
+        and _count_supported_share_prefixes(normalized) == 1
+        and lines[0].lower().startswith(SUPPORTED_SHARE_LINK_PREFIXES)
+    ):
+        return "".join(lines)
+    return normalized
+
+
 def is_supported_share_link(value: str) -> bool:
-    return _normalize_uri_candidate(value).lower().startswith(SUPPORTED_SHARE_LINK_PREFIXES)
+    return _normalize_share_link_candidate(value).lower().startswith(SUPPORTED_SHARE_LINK_PREFIXES)
 
 
 def extract_supported_share_links(payload: str) -> list[str]:
@@ -73,7 +91,7 @@ def parse_share_link(
     subscription_id: str | None = None,
 ) -> ServerEntry:
     server = _parse_uri(
-        _normalize_uri_candidate(link),
+        _normalize_share_link_candidate(link),
         source=source,
         subscription_id=subscription_id,
         silent=False,

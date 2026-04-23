@@ -238,3 +238,20 @@ def test_cleanup_runtime_artifacts_requests_tunnel_uninstall(tmp_path) -> None:
     run_process.assert_called_once()
     assert "/uninstalltunnelservice" in run_process.call_args.args[0]
     assert not runtime_dir.exists()
+
+
+def test_cleanup_tunnel_service_downgrades_permission_denied_to_warning(tmp_path) -> None:
+    manager, executable_path = _make_manager(tmp_path)
+
+    with (
+        patch.object(manager._logger, "warning") as warning_log,
+        patch.object(manager._logger, "exception") as exception_log,
+        patch(
+            "vynex_vpn_client.amneziawg_process_manager.subprocess.run",
+            side_effect=PermissionError("access denied"),
+        ),
+    ):
+        manager._cleanup_tunnel_service(executable_path=executable_path, tunnel_name="office-awg")
+
+    warning_log.assert_called_once()
+    exception_log.assert_not_called()

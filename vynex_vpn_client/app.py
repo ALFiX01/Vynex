@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 
 import questionary
 from questionary import Choice, Separator, Style
+from questionary.constants import INDICATOR_SELECTED, INDICATOR_UNSELECTED
 from questionary.prompts.select import (
     Application,
     DEFAULT_QUESTION_PREFIX,
@@ -58,11 +59,14 @@ if __package__ in {None, ""}:
         AMNEZIAWG_WINTUN_DLL,
         APP_NAME,
         APP_VERSION,
+        DEFAULT_CONSOLE_COLUMNS,
+        DEFAULT_CONSOLE_LINES,
         GEOIP_PATH,
         GEOSITE_PATH,
         LOGO_FILE,
         SINGBOX_EXECUTABLE,
         SUBSCRIPTION_TITLE_BY_HOST,
+        WINTUN_DLL,
         XRAY_EXECUTABLE,
     )
     from vynex_vpn_client.healthcheck import HealthcheckResult, XrayHealthChecker
@@ -128,11 +132,14 @@ else:
         AMNEZIAWG_WINTUN_DLL,
         APP_NAME,
         APP_VERSION,
+        DEFAULT_CONSOLE_COLUMNS,
+        DEFAULT_CONSOLE_LINES,
         GEOIP_PATH,
         GEOSITE_PATH,
         LOGO_FILE,
         SINGBOX_EXECUTABLE,
         SUBSCRIPTION_TITLE_BY_HOST,
+        WINTUN_DLL,
         XRAY_EXECUTABLE,
     )
     from .healthcheck import HealthcheckResult, XrayHealthChecker
@@ -180,6 +187,41 @@ else:
 FLAG_EMOJI_PATTERN = re.compile(r"[\U0001F1E6-\U0001F1FF]{2}")
 MAX_SERVER_NAME_DISPLAY_WIDTH = 39
 WINWS_CONFLICT_PROCESS_NAMES = ("Winws.exe", "Winws2.exe")
+PHYSICAL_KEY_LAYOUT_MAP = {
+    "q": "й",
+    "w": "ц",
+    "e": "у",
+    "r": "к",
+    "t": "е",
+    "y": "н",
+    "u": "г",
+    "i": "ш",
+    "o": "щ",
+    "p": "з",
+    "[": "х",
+    "]": "ъ",
+    "a": "ф",
+    "s": "ы",
+    "d": "в",
+    "f": "а",
+    "g": "п",
+    "h": "р",
+    "j": "о",
+    "k": "л",
+    "l": "д",
+    ";": "ж",
+    "'": "э",
+    "z": "я",
+    "x": "ч",
+    "c": "с",
+    "v": "м",
+    "b": "и",
+    "n": "т",
+    "m": "ь",
+    ",": "б",
+    ".": "ю",
+    "/": ".",
+}
 
 
 @dataclass(frozen=True)
@@ -224,6 +266,112 @@ class TerminalInquirerControl(InquirerControl):
         self.found_in_search = len(filtered) > 0
         return filtered if self.found_in_search else self.choices
 
+    @staticmethod
+    def _choice_style_class(choice: Choice) -> str | None:
+        style_class = getattr(choice, "_vynex_style_class", None)
+        if style_class is None:
+            return None
+        normalized = str(style_class).strip()
+        return normalized or None
+
+    def _choice_title_style(self, choice: Choice, *, selected: bool, index: int) -> str:
+        if selected:
+            base_style = "class:selected"
+        elif index == self.pointed_at:
+            base_style = "class:highlighted"
+        else:
+            base_style = "class:text"
+        extra_style = self._choice_style_class(choice)
+        if extra_style is None:
+            return base_style
+        return f"class:{extra_style} {base_style}"
+
+    def _get_choice_tokens(self):
+        tokens = []
+
+        def append(index: int, choice: Choice):
+            selected = choice.value in self.selected_options
+
+            if index == self.pointed_at:
+                if self.pointer is not None:
+                    tokens.append(("class:pointer", f" {self.pointer} "))
+                else:
+                    tokens.append(("class:text", " " * 3))
+                tokens.append(("[SetCursorPosition]", ""))
+            else:
+                pointer_length = len(self.pointer) if self.pointer is not None else 1
+                tokens.append(("class:text", " " * (2 + pointer_length)))
+
+            if isinstance(choice, Separator):
+                tokens.append(("class:separator", f"{choice.title}"))
+                tokens.append(("", "\n"))
+                return
+
+            if choice.disabled:
+                if isinstance(choice.title, list):
+                    tokens.append(("class:selected" if selected else "class:disabled", "- "))
+                    tokens.extend(choice.title)
+                else:
+                    tokens.append(
+                        (
+                            "class:selected" if selected else "class:disabled",
+                            f"- {choice.title}",
+                        )
+                    )
+                tokens.append(
+                    (
+                        "class:selected" if selected else "class:disabled",
+                        "" if isinstance(choice.disabled, bool) else f" ({choice.disabled})",
+                    )
+                )
+                tokens.append(("", "\n"))
+                return
+
+            shortcut = choice.get_shortcut_title() if self.use_shortcuts else ""
+            if selected:
+                indicator = f"{INDICATOR_SELECTED} " if self.use_indicator else ""
+                tokens.append(("class:selected", indicator))
+            else:
+                indicator = f"{INDICATOR_UNSELECTED} " if self.use_indicator else ""
+                tokens.append(("class:text", indicator))
+
+            if isinstance(choice.title, list):
+                if shortcut:
+                    tokens.append(
+                        (
+                            self._choice_title_style(choice, selected=selected, index=index),
+                            shortcut,
+                        )
+                    )
+                tokens.extend(choice.title)
+            else:
+                tokens.append(
+                    (
+                        self._choice_title_style(choice, selected=selected, index=index),
+                        f"{shortcut}{choice.title}",
+                    )
+                )
+
+            tokens.append(("", "\n"))
+
+        for i, c in enumerate(self.filtered_choices):
+            append(i, c)
+
+        current = self.get_pointed_at()
+        if self.show_selected:
+            answer = current.get_shortcut_title() if self.use_shortcuts else ""
+            answer += current.title if isinstance(current.title, str) else current.title[0][1]
+            tokens.append(("class:text", f"  Answer: {answer}"))
+
+        show_description = self.show_description and current.description is not None
+        if show_description:
+            tokens.append(("class:text", f"  Description: {current.description}"))
+
+        if not (self.show_selected or show_description):
+            tokens.pop()
+
+        return tokens
+
 
 class VynexVpnApp:
     def __init__(self) -> None:
@@ -266,8 +414,11 @@ class VynexVpnApp:
         self.system_proxy_manager = WindowsSystemProxyManager()
         self.app_release_info: AppReleaseInfo | None = self.app_update_checker.get_cached_release(max_age_seconds=None)
         self._app_update_thread: threading.Thread | None = None
+        self._startup_subscription_refresh_thread: threading.Thread | None = None
         self._proxy_session: ProxyRuntimeSession | None = None
+        self._runtime_state_cache: RuntimeState | None = None
         self._runtime_notice: RuntimeNotice | None = None
+        self._console_window_size: tuple[int, int] | None = None
         self._should_exit = False
         self.logo = self._load_logo()
 
@@ -279,7 +430,7 @@ class VynexVpnApp:
             self._startup_auto_refresh_subscriptions()
             self._startup_quick_import_flow()
             while True:
-                self._render_screen()
+                self._render_screen(show_banner=True)
                 action = self._ask_main_menu()
                 if action is None:
                     return 0
@@ -295,6 +446,12 @@ class VynexVpnApp:
             self._shutdown()
 
     def _ensure_xray_ready(self) -> None:
+        missing_components = self._missing_startup_runtime_components()
+        if missing_components:
+            self._show_runtime_auto_install_notice(
+                components=missing_components,
+                title="Подготовка приложения",
+            )
         try:
             self.installer.ensure_xray()
         except Exception as exc:  # noqa: BLE001
@@ -308,20 +465,95 @@ class VynexVpnApp:
         if self.installer.warnings:
             self._show_installer_warnings()
 
-    def _render_banner(self) -> None:
+    def _render_banner(self, state: RuntimeState | None = None) -> None:
+        runtime_state = state or self._current_state()
         title_markup = f"[bold cyan]{self.logo}[/bold cyan]" if self.logo else f"[bold cyan]{APP_NAME}[/bold cyan]"
         max_content_width = max(20, self.console.width - 2)
         title = Text.from_markup(title_markup)
-        status = Text.from_markup(self._banner_status_line())
+        status = Text.from_markup(self._banner_status_line(runtime_state))
         status.pad_left(1)
         status.truncate(max_content_width, overflow="ellipsis")
         banner = Group(Text(""), title, Text(""), status)
-        self.console.print(Panel.fit(banner, border_style=self._banner_border_style(), padding=(0, 1)))
+        self.console.print(
+            Panel.fit(
+                banner,
+                border_style=self._banner_border_style(runtime_state),
+                padding=(0, 1),
+            )
+        )
 
-    def _render_screen(self) -> None:
+    @staticmethod
+    def _default_console_window_size() -> tuple[int, int]:
+        return DEFAULT_CONSOLE_COLUMNS, DEFAULT_CONSOLE_LINES
+
+    @staticmethod
+    def _adaptive_console_lines(
+        item_count: int,
+        *,
+        base_lines: int = DEFAULT_CONSOLE_LINES,
+        baseline_items: int = 12,
+        max_lines: int = 60,
+        items_per_extra_line: int = 2,
+    ) -> int:
+        normalized_count = max(0, int(item_count))
+        normalized_step = max(1, int(items_per_extra_line))
+        extra_items = max(0, normalized_count - baseline_items)
+        extra_lines = (extra_items + normalized_step - 1) // normalized_step
+        return min(max_lines, max(base_lines, base_lines + extra_lines))
+
+    def _list_console_window_size(
+        self,
+        item_count: int,
+        *,
+        columns: int = DEFAULT_CONSOLE_COLUMNS,
+        baseline_items: int = 12,
+        max_lines: int = 60,
+        items_per_extra_line: int = 2,
+    ) -> tuple[int, int]:
+        return (
+            max(DEFAULT_CONSOLE_COLUMNS, columns),
+            self._adaptive_console_lines(
+                item_count,
+                base_lines=DEFAULT_CONSOLE_LINES,
+                baseline_items=baseline_items,
+                max_lines=max_lines,
+                items_per_extra_line=items_per_extra_line,
+            ),
+        )
+
+    def _server_manager_console_window_size(self, item_count: int) -> tuple[int, int]:
+        return self._list_console_window_size(
+            item_count,
+            columns=150,
+            baseline_items=18,
+            max_lines=54,
+            items_per_extra_line=2,
+        )
+
+    def _apply_console_window_size(self, columns: int, lines: int) -> None:
+        target_size = (max(80, int(columns)), max(25, int(lines)))
+        if self._console_window_size == target_size:
+            return
+        if sys.platform != "win32" or not sys.stdout.isatty():
+            self._console_window_size = target_size
+            return
+        try:
+            os.system(f"mode con cols={target_size[0]} lines={target_size[1]} > nul")
+        except Exception:
+            return
+        self._console_window_size = target_size
+
+    def _render_screen(
+        self,
+        *,
+        window_size: tuple[int, int] | None = None,
+        show_banner: bool = False,
+    ) -> None:
+        self._apply_console_window_size(*(window_size or self._default_console_window_size()))
         os.system("cls")
-        self._render_banner()
-        self.console.print()
+        if show_banner:
+            self._render_banner(self._current_state())
+            self.console.print()
         if self._runtime_notice:
             self.console.print(
                 Panel.fit(
@@ -371,6 +603,7 @@ class VynexVpnApp:
                 choices=[
                     f"Менеджер серверов: {len(servers)}",
                     f"Менеджер подписок: {len(subscriptions)}",
+                    Choice(title="Быстрый импорт сервера / подписки", value="__add__"),
                     "Назад",
                 ],
                 use_shortcuts=True,
@@ -381,6 +614,8 @@ class VynexVpnApp:
                 self._show_servers_overview()
             elif selected_action.startswith("Менеджер подписок:"):
                 self._show_subscriptions_overview()
+            elif selected_action == "__add__":
+                self.add_server_flow()
 
     def _show_servers_overview(self) -> None:
         last_ping_signature: tuple[tuple[str, str, str, int], ...] | None = None
@@ -409,29 +644,31 @@ class VynexVpnApp:
             servers = self._sorted_servers(loaded_servers)
             state = self._current_state()
             active_server_id = state.server_id if state.is_running else None
-            self._render_screen()
-            if servers:
-                self.console.print(self._servers_table(servers, active_server_id=active_server_id))
-            else:
+            self._render_screen(window_size=self._server_manager_console_window_size(len(servers)))
+            if not servers:
                 self.console.print(
                     Panel.fit(
-                        "Список серверов пуст. Используйте быстрый импорт: одна строка для сервера или URL подписки.",
+                        "Список серверов пуст. Используйте быстрый импорт в разделе управления серверами и подписками.",
                         title="Менеджер серверов",
                         border_style="yellow",
                     )
                 )
+            manager_column_widths = self._server_manager_column_widths(
+                servers,
+                active_server_id=active_server_id,
+            )
             choices: list[Choice] = []
             for server in servers:
                 choices.append(
                     Choice(
-                        title=self._server_manager_choice_title(server, active_server_id=active_server_id),
+                        title=self._server_manager_choice_title(
+                            server,
+                            active_server_id=active_server_id,
+                            **manager_column_widths,
+                        ),
                         value=server.id,
                     )
                 )
-            if servers:
-                choices.append(Separator(" "))
-                choices.append(Choice(title="Обновить TCP ping у всех", value="__tcp_ping_all__"))
-            choices.append(Choice(title="Быстрый импорт: сервер / подписка", value="__add__"))
             choices.append(Choice(title="Назад", value="__back__"))
             selected_action = self._select(
                 "Менеджер серверов",
@@ -456,25 +693,6 @@ class VynexVpnApp:
                 continue
             if selected_action in (None, "__back__"):
                 return
-            if selected_action == "__tcp_ping_all__":
-                current_servers = self.storage.load_servers()
-                if not current_servers:
-                    continue
-                try:
-                    self._refresh_servers_tcp_ping_cache(
-                        current_servers,
-                        status_message=f"[bold cyan]Обновляем TCP ping для {len(current_servers)} серверов...[/bold cyan]",
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    self._render_screen()
-                    self._show_error("TCP ping серверов", exc)
-                    self._pause()
-                else:
-                    last_ping_signature = self._servers_tcp_ping_signature(current_servers)
-                continue
-            if selected_action == "__add__":
-                self.add_server_flow()
-                continue
             self._server_details_flow(selected_action)
 
     def tcp_ping_all_flow(self) -> None:
@@ -512,16 +730,25 @@ class VynexVpnApp:
         self.console.print(self._tcp_ping_results_table(servers, results, active_server_id=active_server_id))
         self._pause()
 
+    def _refresh_all_servers_manager_tcp_ping(self) -> list[ServerEntry]:
+        current_servers = self.storage.load_servers()
+        if not current_servers:
+            return []
+        return self._refresh_servers_tcp_ping_cache(
+            current_servers,
+            status_message=f"[bold cyan]Обновляем TCP ping для {len(current_servers)} серверов...[/bold cyan]",
+        )
+
     def _show_subscriptions_overview(self) -> None:
         while True:
             subscriptions = self.storage.load_subscriptions()
-            self._render_screen()
+            self._render_screen(window_size=self._list_console_window_size(len(subscriptions), baseline_items=10))
             if subscriptions:
                 self.console.print(self._subscriptions_table(subscriptions))
             else:
                 self.console.print(
                     Panel.fit(
-                        "Список подписок пуст. Через быстрый импорт можно вставить URL подписки или одиночный сервер.",
+                        "Список подписок пуст. Используйте быстрый импорт в разделе управления серверами и подписками.",
                         title="Менеджер подписок",
                         border_style="yellow",
                     )
@@ -536,7 +763,6 @@ class VynexVpnApp:
                 )
             if subscriptions:
                 choices.append(Separator(" "))
-            choices.append(Choice(title="Быстрый импорт: сервер / подписка", value="__add__"))
             if subscriptions:
                 choices.append(Choice(title="Обновить все подписки", value="__refresh_all__"))
             choices.append(Choice(title="Назад", value="__back__"))
@@ -562,9 +788,6 @@ class VynexVpnApp:
                 continue
             if selected_action in (None, "__back__"):
                 return
-            if selected_action == "__add__":
-                self.add_subscription_flow()
-                continue
             if selected_action == "__refresh_all__":
                 self.update_subscriptions_flow()
                 continue
@@ -576,12 +799,30 @@ class VynexVpnApp:
         self._show_empty_servers_import_flow(title="Быстрый старт")
 
     def _startup_auto_refresh_subscriptions(self) -> None:
+        if self._startup_subscription_refresh_thread is not None and self._startup_subscription_refresh_thread.is_alive():
+            return
         try:
             settings = self._validated_settings(raise_on_error=False)
             if not settings.auto_update_subscriptions_on_startup:
                 return
             if not self.storage.load_subscriptions():
                 return
+        except Exception as exc:  # noqa: BLE001
+            self._runtime_notice = RuntimeNotice(
+                message=f"Не удалось запустить авто-обновление подписок: {self._error_text(exc)}",
+                title="Авто-обновление подписок",
+                border_style="red",
+            )
+            return
+        self._startup_subscription_refresh_thread = threading.Thread(
+            target=self._refresh_subscriptions_on_startup_in_background,
+            name="vynex-startup-subscription-refresh",
+            daemon=True,
+        )
+        self._startup_subscription_refresh_thread.start()
+
+    def _refresh_subscriptions_on_startup_in_background(self) -> None:
+        try:
             success, failed = self.subscription_manager.refresh_all(only_auto_update=True)
         except Exception as exc:  # noqa: BLE001
             self._runtime_notice = RuntimeNotice(
@@ -644,13 +885,20 @@ class VynexVpnApp:
                 return
         name_width = self._server_name_column_width(servers)
         protocol_width = max((self._display_width(server.protocol.upper()) for server in servers), default=5)
-        self._render_screen()
+        address_width = max((self._display_width(f"{server.host}:{server.port}") for server in servers), default=1)
+        ping_width = max((self._display_width(self._cached_tcp_ping_label(server)) for server in servers), default=1)
+        best_server_id = self._best_cached_tcp_ping_server_id(servers)
+        self._render_screen(window_size=self._list_console_window_size(len(servers), baseline_items=11))
         selected_server_id = self._select(
             "Выберите сервер",
             choices=[
-                Choice(
-                    title=self._server_choice_title(server.name, server.protocol.upper(), f"{server.host}:{server.port}", name_width, protocol_width),
-                    value=server.id,
+                self._connect_server_choice(
+                    server,
+                    name_width=name_width,
+                    protocol_width=protocol_width,
+                    address_width=address_width,
+                    ping_width=ping_width,
+                    is_best=server.id == best_server_id,
                 )
                 for server in servers
             ] + [Choice(title="Назад", value="__back__")],
@@ -701,7 +949,11 @@ class VynexVpnApp:
                 routing_label,
                 "Подготовка параметров подключения...",
             )
-            backend.ensure_runtime_ready(connection_profile)
+            self._ensure_runtime_ready(
+                mode,
+                server=selected_server,
+                routing_profile=routing_profile,
+            )
             if mode == "TUN":
                 self._show_connection_progress(
                     self._ui_server_name(selected_server.name),
@@ -838,7 +1090,7 @@ class VynexVpnApp:
                 tun_route_prefixes=tun_route_prefixes,
                 outbound_interface_name=outbound_interface.alias if outbound_interface else None,
             )
-            self.storage.save_runtime_state(state)
+            self._save_runtime_state(state)
             self._proxy_session = proxy_session
             detail_rows = [
                 ("Сервер", self._ui_server_name(selected_server.name)),
@@ -922,7 +1174,7 @@ class VynexVpnApp:
             if system_proxy_applied:
                 self.system_proxy_manager.restore(previous_system_proxy)
             self._proxy_session = None
-            self.storage.save_runtime_state(RuntimeState())
+            self._reset_runtime_state()
             self._render_screen()
             self._show_error("Ошибка подключения", exc)
             self._pause()
@@ -1068,12 +1320,7 @@ class VynexVpnApp:
         if selected_value in (None, "__back__", "__add__"):
             return
         if action_result.action == "refresh":
-            if selected_value == "__tcp_ping_all__":
-                self.tcp_ping_all_flow()
-                return
-            self._refresh_server_tcp_ping_cache(str(selected_value))
-            return
-        if selected_value == "__tcp_ping_all__":
+            self._refresh_all_servers_manager_tcp_ping()
             return
         server = self.storage.get_server(str(selected_value))
         if server is None:
@@ -1105,7 +1352,7 @@ class VynexVpnApp:
             for server in servers
         ] + [Choice(title="Назад", value="__back__")]
 
-        self._render_screen()
+        self._render_screen(window_size=self._list_console_window_size(len(servers), baseline_items=11))
         selected_server_id = self._select(
             "Выберите сервер для удаления",
             choices=choices,
@@ -1309,7 +1556,7 @@ class VynexVpnApp:
         normalized = raw_value.strip()
         if not normalized:
             raise ValueError("Пустой ввод.")
-        if "\n" not in normalized and "\r" not in normalized and is_supported_share_link(normalized):
+        if is_supported_share_link(normalized):
             return "server", normalized
         parsed = urlparse(normalized)
         if parsed.scheme.lower() in {"http", "https"} and parsed.netloc:
@@ -1344,10 +1591,10 @@ class VynexVpnApp:
             selected_action = self._select(
                 "Действия с подпиской",
                 choices=[
-                    "Обновить",
-                    "Изменить название",
+                    "Обновить сейчас",
+                    "Открыть список серверов",
+                    "Переименовать",
                     "Изменить URL",
-                    "Показать сервера подписки",
                     "Удалить подписку",
                     "Назад",
                 ],
@@ -1356,14 +1603,14 @@ class VynexVpnApp:
             if selected_action in (None, "Назад"):
                 return
             try:
-                if selected_action == "Обновить":
+                if selected_action == "Обновить сейчас":
                     imported = self._refresh_subscription(subscription)
                     self._show_subscription_refresh_success("Подписка обновлена", subscription, imported)
-                elif selected_action == "Изменить название":
+                elif selected_action == "Переименовать":
                     self._rename_subscription_flow(subscription)
                 elif selected_action == "Изменить URL":
                     self._edit_subscription_url_flow(subscription)
-                elif selected_action == "Показать сервера подписки":
+                elif selected_action == "Открыть список серверов":
                     self._show_subscription_servers(subscription)
                 elif selected_action == "Удалить подписку":
                     if self._delete_subscription_flow(subscription):
@@ -1569,17 +1816,29 @@ class VynexVpnApp:
             settings = self._validated_settings(raise_on_error=False)
             active_routing_name = self._active_routing_profile_name()
             self._render_screen()
+            connection_mode_choice = self._settings_menu_choice(
+                "Режим подключения: ",
+                self._connection_mode_label(settings.connection_mode),
+            )
+            system_proxy_choice = self._settings_menu_choice(
+                "Системный proxy (PROXY): ",
+                "Вкл" if settings.set_system_proxy else "Выкл",
+            )
+            auto_update_choice = self._settings_menu_choice(
+                "Авто-обновление подписок при запуске: ",
+                "Вкл" if settings.auto_update_subscriptions_on_startup else "Выкл",
+            )
+            routing_choice = self._settings_menu_choice(
+                "Набор маршрутизации: ",
+                active_routing_name,
+            )
             selected_action = self._select(
                 "Настройки",
                 choices=[
-                    f"Режим подключения: {self._connection_mode_label(settings.connection_mode)}",
-                    "Системный proxy (PROXY): Вкл" if settings.set_system_proxy else "Системный proxy (PROXY): Выкл",
-                    (
-                        "Авто-обновление подписок при запуске: Вкл"
-                        if settings.auto_update_subscriptions_on_startup
-                        else "Авто-обновление подписок при запуске: Выкл"
-                    ),
-                    f"Набор маршрутизации: {active_routing_name}",
+                    connection_mode_choice,
+                    system_proxy_choice,
+                    auto_update_choice,
+                    routing_choice,
                     "Сбросить системный proxy",
                     "Назад",
                 ],
@@ -1639,7 +1898,7 @@ class VynexVpnApp:
             selected_action = self._select(
                 "Компоненты",
                 choices=[
-                    self._component_choice_label("Xray-core", XRAY_EXECUTABLE),
+                    self._xray_component_label(),
                     self._component_choice_label("sing-box", SINGBOX_EXECUTABLE),
                     self._amneziawg_component_label(),
                     self._component_choice_label("geoip.dat", GEOIP_PATH),
@@ -1789,6 +2048,7 @@ class VynexVpnApp:
             engine_state_label = self._runtime_engine_state_label(RuntimeState(mode=default_mode))
             table = Table(show_header=False, box=None)
             table.add_row("Версия", f"v{APP_VERSION}", style="dim")
+            table.add_row("Xray-core", self._xray_version_status_label(), style="dim")
             if self._available_app_update() is not None:
                 table.add_row("Обновление", self._available_app_update_label(), style="bold cyan")
             table.add_row(
@@ -1813,17 +2073,10 @@ class VynexVpnApp:
                 style="cyan" if settings.connection_mode == "PROXY" and settings.set_system_proxy else "dim",
             )
             table.add_row(
-                "Подписки при запуске",
-                "Обновлять автоматически" if settings.auto_update_subscriptions_on_startup else "Не обновлять",
-                style="cyan" if settings.auto_update_subscriptions_on_startup else "dim",
-            )
-            table.add_row(
                 "Маршрут",
                 self._active_routing_profile_name(),
                 style="bold cyan",
             )
-            if settings.connection_mode == "TUN":
-                table.add_row("TUN", "Нужны права администратора", style="yellow")
             self._render_screen()
             self.console.print(
                 Panel.fit(
@@ -1837,6 +2090,7 @@ class VynexVpnApp:
         server = self.storage.get_server(state.server_id) if state.server_id else None
         table = Table(show_header=False, box=None)
         table.add_row("Версия", f"v{APP_VERSION}", style="dim")
+        table.add_row("Xray-core", self._xray_version_status_label(), style="dim")
         if self._available_app_update() is not None:
             table.add_row("Обновление", self._available_app_update_label(), style="bold cyan")
         table.add_row("Процесс", self._runtime_status_text(state), style=self._runtime_engine_state_style(state))
@@ -1877,7 +2131,7 @@ class VynexVpnApp:
             table.add_row("Внешний интерфейс", state.outbound_interface_name or "-", style="dim")
             table.add_row("Системный proxy", "Нет", style="dim")
         self._render_screen()
-        self.console.print(Panel.fit(table, title="Статус подключения", border_style=self._banner_border_style()))
+        self.console.print(Panel.fit(table, title="Статус подключения", border_style=self._banner_border_style(state)))
         self._pause()
 
     def _prompt_port(self, title: str, default: int) -> int:
@@ -1890,11 +2144,24 @@ class VynexVpnApp:
             raise ValueError(f"Некорректное значение порта для '{title}'.") from exc
 
     def _load_runtime_state_or_recover(self) -> RuntimeState:
+        cached_state = getattr(self, "_runtime_state_cache", None)
+        if cached_state is not None:
+            return cached_state
         try:
-            return self.storage.load_runtime_state()
+            state = self.storage.load_runtime_state()
         except StorageCorruptionError as exc:
             self._handle_runtime_state_corruption(exc)
-            return RuntimeState()
+            state = RuntimeState()
+        self._runtime_state_cache = state
+        return state
+
+    def _save_runtime_state(self, state: RuntimeState) -> RuntimeState:
+        self.storage.save_runtime_state(state)
+        self._runtime_state_cache = state
+        return state
+
+    def _reset_runtime_state(self) -> RuntimeState:
+        return self._save_runtime_state(RuntimeState())
 
     def _current_state(self) -> RuntimeState:
         state = self._load_runtime_state_or_recover()
@@ -1911,8 +2178,8 @@ class VynexVpnApp:
         if main_dead or helper_dead:
             self._proxy_session = None
             self._disconnect_runtime(silent=True)
-            self.storage.save_runtime_state(RuntimeState())
-            return RuntimeState()
+            return self._load_runtime_state_or_recover()
+        self._runtime_state_cache = state
         return state
 
     def _reconcile_runtime_state(self) -> None:
@@ -1977,7 +2244,7 @@ class VynexVpnApp:
             self.process_manager.stop(state.helper_pid)
         self._proxy_session = None
         self._restore_system_proxy(state)
-        self.storage.save_runtime_state(RuntimeState())
+        self._reset_runtime_state()
         if not silent:
             self.console.print(Panel.fit("Подключение остановлено.", border_style="green"))
 
@@ -2036,7 +2303,7 @@ class VynexVpnApp:
         if not manager.is_running(state.pid):
             return state
         state.pid = current_pid
-        self.storage.save_runtime_state(state)
+        self._save_runtime_state(state)
         return state
 
     def _handle_xray_crash(self) -> None:
@@ -2054,7 +2321,7 @@ class VynexVpnApp:
             self._cleanup_tun_state(state)
         else:
             self._restore_system_proxy(state)
-        self.storage.save_runtime_state(RuntimeState())
+        self._reset_runtime_state()
         engine_title = self._backend_engine_title(backend_id)
         if mode == "TUN":
             self._runtime_notice = RuntimeNotice(
@@ -2093,14 +2360,16 @@ class VynexVpnApp:
         normalized = str(routing_name or "").strip()
         return normalized or "-"
 
-    def _banner_status_line(self) -> str:
-        state = self._current_state()
+    def _banner_status_line(self, state: RuntimeState | None = None) -> str:
+        runtime_state = state or self._current_state()
         settings = self._validated_settings(raise_on_error=False)
-        mode_value = state.mode if state.is_running and state.mode else settings.connection_mode
+        mode_value = runtime_state.mode if runtime_state.is_running and runtime_state.mode else settings.connection_mode
         mode_label = self._connection_mode_markup(mode_value)
         routing_source = self._routing_display_name(
-            state.backend_id if state.is_running else None,
-            state.routing_profile_name if state.is_running and state.routing_profile_name else self._active_routing_profile_name(),
+            runtime_state.backend_id if runtime_state.is_running else None,
+            runtime_state.routing_profile_name
+            if runtime_state.is_running and runtime_state.routing_profile_name
+            else self._active_routing_profile_name(),
         )
         routing_name = escape(self._shorten_text(routing_source, 28))
         update_suffix = ""
@@ -2109,8 +2378,8 @@ class VynexVpnApp:
                 f" | [bold cyan]Обновление:[/bold cyan] "
                 f"[bold yellow]{escape(self._available_app_update_label())}[/bold yellow]"
             )
-        if state.is_running:
-            server = self.storage.get_server(state.server_id) if state.server_id else None
+        if runtime_state.is_running:
+            server = self.storage.get_server(runtime_state.server_id) if runtime_state.server_id else None
             server_name = escape(
                 self._shorten_text(
                     self._ui_server_name(server.name) if server else "сервер недоступен",
@@ -2118,7 +2387,7 @@ class VynexVpnApp:
                 )
             )
             return (
-                f"[bold]Статус:[/bold] {self._runtime_status_markup(state)}"
+                f"[bold]Статус:[/bold] {self._runtime_status_markup(runtime_state)}"
                 f" | [bold]Сервер:[/bold] [white]{server_name}[/white]"
                 f" | [bold]Режим:[/bold] {mode_label}"
                 f" | [bold]Маршрут:[/bold] [cyan]{routing_name}[/cyan]"
@@ -2131,8 +2400,9 @@ class VynexVpnApp:
             f"{update_suffix}"
         )
 
-    def _banner_border_style(self) -> str:
-        return "green" if self._current_state().is_running else "cyan"
+    def _banner_border_style(self, state: RuntimeState | None = None) -> str:
+        runtime_state = state or self._current_state()
+        return "green" if runtime_state.is_running else "cyan"
 
     @staticmethod
     def _connection_mode_style(value: str | None) -> str:
@@ -2410,7 +2680,7 @@ class VynexVpnApp:
                 return (
                     "Для TUN режима клиент должен быть запущен с правами администратора.",
                     [
-                        "Закройте приложение и запустите `VynexVPNClient.exe` через 'Запуск от имени администратора'.",
+                        *self._admin_launch_instructions(),
                         "После перезапуска повторите подключение в режиме TUN.",
                     ],
                     details,
@@ -2666,6 +2936,42 @@ class VynexVpnApp:
                 )
 
         if title == "Ошибка импорта":
+            if "в ссылке отсутствует идентификатор или пароль" in normalized:
+                return (
+                    "В ссылке сервера нет обязательного идентификатора или пароля.",
+                    [
+                        "Для VLESS и VMess проверьте UUID перед символом @.",
+                        "Для Trojan, Shadowsocks и Hysteria2 проверьте пароль или userinfo-часть ссылки.",
+                    ],
+                    details,
+                )
+            if "в shadowsocks ссылке отсутствуют method:password" in normalized:
+                return (
+                    "В ссылке Shadowsocks отсутствуют метод шифрования и пароль.",
+                    [
+                        "Проверьте, что credentials-часть ссылки содержит `method:password`.",
+                        "Если ссылка закодирована в Base64, скопируйте ее заново целиком.",
+                    ],
+                    details,
+                )
+            if "некорректный порт hysteria2" in normalized or "в ссылке указан некорректный порт" in normalized:
+                return (
+                    "В ссылке сервера указан некорректный порт.",
+                    [
+                        "Проверьте число после двоеточия в адресе сервера.",
+                        "Если ссылка была перенесена по строкам, скопируйте ее заново без потери символов.",
+                    ],
+                    details,
+                )
+            if "ссылка содержит поврежденные или неполные данные" in normalized:
+                return (
+                    "Ссылка сервера повреждена или скопирована не полностью.",
+                    [
+                        "Скопируйте ссылку заново и убедитесь, что она вставлена целиком.",
+                        "Если ссылка пришла в Base64 или из мессенджера, проверьте, что не потерялись символы в начале и в конце.",
+                    ],
+                    details,
+                )
             if "не удалось определить формат" in normalized:
                 return (
                     "Клиент не смог понять, что именно было вставлено.",
@@ -2877,9 +3183,66 @@ class VynexVpnApp:
         )
 
     @staticmethod
+    def _admin_launch_instructions() -> list[str]:
+        if sys.platform != "win32":
+            return ["Перезапустите приложение с повышенными правами и повторите действие."]
+        if getattr(sys, "frozen", False):
+            return ["Закройте приложение и запустите `VynexVPNClient.exe` через 'Запуск от имени администратора'."]
+        return [
+            "Закройте приложение, откройте PowerShell от имени администратора и запустите `python main.py`.",
+            "Если проект запускается из virtualenv, используйте `./.venv/Scripts/python.exe ./main.py`.",
+        ]
+
+    @staticmethod
     def _error_text(error: Exception | str) -> str:
+        if isinstance(error, str):
+            message = error.strip()
+            return message or "Неизвестная ошибка."
+
+        messages: list[str] = []
+        seen_messages: set[str] = set()
+        visited_errors: set[int] = set()
+        current: BaseException | None = error
+
+        while current is not None and id(current) not in visited_errors:
+            visited_errors.add(id(current))
+            message = VynexVpnApp._humanize_error_message(current).strip()
+            if message and message not in seen_messages:
+                messages.append(message)
+                seen_messages.add(message)
+            current = current.__cause__ or current.__context__
+
+        if not messages:
+            return "Неизвестная ошибка."
+        if len(messages) == 1:
+            return messages[0]
+        return f"{messages[0]} Причина: {' Причина: '.join(messages[1:])}"
+
+    @staticmethod
+    def _humanize_error_message(error: BaseException) -> str:
+        if isinstance(error, UnicodeDecodeError):
+            return "Ссылка содержит поврежденные или неполные данные."
+
         message = str(error).strip()
-        return message or "Неизвестная ошибка."
+        normalized = message.lower()
+        if not message:
+            return "Неизвестная ошибка."
+        if "port could not be cast to integer value" in normalized or "invalid literal for int()" in normalized:
+            return "В ссылке указан некорректный порт."
+        if any(
+            token in normalized
+            for token in (
+                "invalid start byte",
+                "invalid continuation byte",
+                "incorrect padding",
+                "invalid base64",
+                "unterminated string",
+                "expecting value",
+                "extra data",
+            )
+        ):
+            return "Ссылка содержит поврежденные или неполные данные."
+        return message
 
     @staticmethod
     def _is_user_cancelled(error: Exception | str) -> bool:
@@ -2909,11 +3272,55 @@ class VynexVpnApp:
         address: str,
         name_width: int,
         protocol_width: int,
+        *,
+        address_width: int | None = None,
+        tcp_ping_label: str | None = None,
+        ping_width: int | None = None,
     ) -> str:
         safe_server_name = self._ui_server_name(server_name)
         aligned_name = self._pad_display_width(self._truncate_display_width(safe_server_name, name_width), name_width)
         aligned_protocol = self._pad_display_width(protocol, protocol_width)
-        return f"{aligned_name} | {aligned_protocol} | {address}"
+        effective_address_width = max(1, address_width or self._display_width(address))
+        aligned_address = self._pad_display_width(
+            self._truncate_display_width(address, effective_address_width),
+            effective_address_width,
+        )
+        title = f"{aligned_name} | {aligned_protocol} | {aligned_address}"
+        if tcp_ping_label is None:
+            return title
+        effective_ping_width = max(1, ping_width or self._display_width(tcp_ping_label))
+        aligned_ping = self._pad_display_width(tcp_ping_label, effective_ping_width)
+        return f"{title} | {aligned_ping}"
+
+    def _connect_server_choice(
+        self,
+        server: ServerEntry,
+        *,
+        name_width: int,
+        protocol_width: int,
+        address_width: int,
+        ping_width: int,
+        is_best: bool,
+    ) -> Choice:
+        choice = Choice(
+            title=self._server_choice_title(
+                server.name,
+                server.protocol.upper(),
+                f"{server.host}:{server.port}",
+                name_width,
+                protocol_width,
+                address_width=address_width,
+                tcp_ping_label=self._cached_tcp_ping_label(server),
+                ping_width=ping_width,
+            ),
+            value=server.id,
+        )
+        if not is_best:
+            return choice
+        styled_choice = self._styled_choice(choice, style_class="best-ping")
+        if isinstance(styled_choice, Choice):
+            return styled_choice
+        return choice
 
     def _show_server_saved(self, title: str, server: ServerEntry) -> None:
         table = Table(show_header=False, box=None, pad_edge=False)
@@ -2941,6 +3348,16 @@ class VynexVpnApp:
         self._render_screen()
         self.console.print(Panel.fit(table, title=title, border_style="green"))
         self._pause()
+
+    @staticmethod
+    def _settings_menu_choice(label: str, value: str) -> Choice:
+        return Choice(
+            title=[
+                ("class:text", label),
+                ("class:settings-value", value),
+            ],
+            value=f"{label}{value}",
+        )
 
     def _tcp_ping_service_instance(self) -> TcpPingService:
         service = getattr(self, "tcp_ping_service", None)
@@ -3127,6 +3544,32 @@ class VynexVpnApp:
         return self._tcp_ping_error_label(server.extra.get("tcp_ping_error"))
 
     @staticmethod
+    def _best_cached_tcp_ping_server_id(servers: list[ServerEntry]) -> str | None:
+        candidates: list[tuple[int, str, str, int, str]] = []
+        for server in servers:
+            if not server.extra.get("tcp_ping_ok"):
+                continue
+            latency_ms = server.extra.get("tcp_ping_ms")
+            if latency_ms is None:
+                continue
+            try:
+                normalized_latency = int(latency_ms)
+            except (TypeError, ValueError):
+                continue
+            candidates.append(
+                (
+                    normalized_latency,
+                    server.name.lower(),
+                    server.host.lower(),
+                    server.port,
+                    server.id,
+                )
+            )
+        if not candidates:
+            return None
+        return min(candidates)[-1]
+
+    @staticmethod
     def _tcp_ping_error_label(error: object) -> str:
         if str(error or "").strip() == TCP_PING_UNSUPPORTED_ERROR:
             return "н/д"
@@ -3153,10 +3596,147 @@ class VynexVpnApp:
             )
         return table
 
-    def _server_manager_choice_title(self, server: ServerEntry, *, active_server_id: str | None) -> str:
-        return self._truncate_display_width(
-            self._ui_server_name(server.name),
-            self._server_name_display_width(min_width=18, reserved_width=28),
+    @staticmethod
+    def _allocate_column_widths(
+        total_width: int,
+        *,
+        preferred_widths: tuple[int, ...],
+        minimum_widths: tuple[int, ...],
+    ) -> tuple[int, ...]:
+        if not preferred_widths:
+            return ()
+        if total_width <= 0:
+            return tuple(1 for _ in preferred_widths)
+        if len(preferred_widths) != len(minimum_widths):
+            raise ValueError("Column width preferences and minimums must have the same length.")
+
+        bounded_total = max(len(preferred_widths), total_width)
+        if sum(minimum_widths) > bounded_total:
+            base_width = bounded_total // len(preferred_widths)
+            widths = [max(1, base_width) for _ in preferred_widths]
+            remainder = max(0, bounded_total - sum(widths))
+            for index in range(remainder):
+                widths[index % len(widths)] += 1
+            return tuple(widths)
+
+        widths = list(minimum_widths)
+        remaining_width = bounded_total - sum(widths)
+        for index, preferred_width in enumerate(preferred_widths):
+            if remaining_width <= 0:
+                break
+            additional_width = min(max(0, preferred_width - widths[index]), remaining_width)
+            widths[index] += additional_width
+            remaining_width -= additional_width
+        return tuple(widths)
+
+    def _server_manager_column_widths(
+        self,
+        servers: list[ServerEntry],
+        *,
+        active_server_id: str | None,
+    ) -> dict[str, int]:
+        protocol_width = max((self._display_width(server.protocol.upper()) for server in servers), default=5)
+        status_width = max(
+            (
+                self._display_width(self._server_status_label(server, active_server_id=active_server_id))
+                for server in servers
+            ),
+            default=8,
+        )
+        ping_width = max((self._display_width(self._cached_tcp_ping_label(server)) for server in servers), default=6)
+        protocol_width = min(max(5, protocol_width), 10)
+        status_width = min(max(7, status_width), 10)
+        ping_width = min(max(5, ping_width), 10)
+
+        preferred_name_width = min(
+            36,
+            max((self._display_width(self._ui_server_name(server.name)) for server in servers), default=18),
+        )
+        preferred_address_width = min(
+            40,
+            max((self._display_width(f"{server.host}:{server.port}") for server in servers), default=18),
+        )
+        preferred_source_width = min(
+            30,
+            max((self._display_width(self._server_source_label(server)) for server in servers), default=12),
+        )
+
+        separator_width = self._display_width(" | ") * 5
+        fixed_columns_width = protocol_width + status_width + ping_width + separator_width
+        available_width = max(18, self.console.width - 6)
+        flexible_width = max(3, available_width - fixed_columns_width)
+        name_width, address_width, source_width = self._allocate_column_widths(
+            flexible_width,
+            preferred_widths=(preferred_name_width, preferred_address_width, preferred_source_width),
+            minimum_widths=(4, 4, 4),
+        )
+        return {
+            "name_width": name_width,
+            "protocol_width": protocol_width,
+            "address_width": address_width,
+            "source_width": source_width,
+            "status_width": status_width,
+            "ping_width": ping_width,
+        }
+
+    def _server_manager_choice_title(
+        self,
+        server: ServerEntry,
+        *,
+        active_server_id: str | None,
+        name_width: int | None = None,
+        protocol_width: int | None = None,
+        address_width: int | None = None,
+        source_width: int | None = None,
+        status_width: int | None = None,
+        ping_width: int | None = None,
+    ) -> str:
+        if None in (name_width, protocol_width, address_width, source_width, status_width, ping_width):
+            widths = self._server_manager_column_widths([server], active_server_id=active_server_id)
+            name_width = widths["name_width"]
+            protocol_width = widths["protocol_width"]
+            address_width = widths["address_width"]
+            source_width = widths["source_width"]
+            status_width = widths["status_width"]
+            ping_width = widths["ping_width"]
+
+        assert name_width is not None
+        assert protocol_width is not None
+        assert address_width is not None
+        assert source_width is not None
+        assert status_width is not None
+        assert ping_width is not None
+
+        return " | ".join(
+            (
+                self._pad_display_width(
+                    self._truncate_display_width(self._ui_server_name(server.name), name_width),
+                    name_width,
+                ),
+                self._pad_display_width(
+                    self._truncate_display_width(server.protocol.upper(), protocol_width),
+                    protocol_width,
+                ),
+                self._pad_display_width(
+                    self._truncate_display_width(f"{server.host}:{server.port}", address_width),
+                    address_width,
+                ),
+                self._pad_display_width(
+                    self._truncate_display_width(self._server_source_label(server), source_width),
+                    source_width,
+                ),
+                self._pad_display_width(
+                    self._truncate_display_width(
+                        self._server_status_label(server, active_server_id=active_server_id),
+                        status_width,
+                    ),
+                    status_width,
+                ),
+                self._pad_display_width(
+                    self._truncate_display_width(self._cached_tcp_ping_label(server), ping_width),
+                    ping_width,
+                ),
+            )
         )
 
     def _server_details_panel(
@@ -3291,65 +3871,113 @@ class VynexVpnApp:
 
     def _subscriptions_table(self, subscriptions: list[SubscriptionEntry]) -> Table:
         table = Table(title="Подписки")
-        table.add_column("Название", overflow="fold", max_width=max(20, self.console.width - 72))
-        table.add_column("Серверов", no_wrap=True)
-        table.add_column("Обновлено", no_wrap=True)
+        table.add_column("Название", overflow="fold", max_width=max(20, self.console.width - 64))
+        table.add_column("Источник", no_wrap=True, overflow="ellipsis", max_width=22)
+        table.add_column("Серверы", no_wrap=True)
         table.add_column("Статус", no_wrap=True)
         for subscription in subscriptions:
             table.add_row(
                 self._layout_safe_text(subscription.title),
-                str(len(self._subscription_servers(subscription.id))),
-                self._shorten_text(subscription.updated_at, 19),
+                self._subscription_source_label(subscription),
+                self._subscription_servers_label(self._subscription_server_count(subscription)),
                 self._subscription_status_label(subscription),
                 style=self._subscription_row_style(subscription),
             )
         return table
 
     def _subscription_choice_title(self, subscription: SubscriptionEntry) -> str:
+        source_label = self._subscription_source_label(subscription)
+        servers_label = self._subscription_servers_label(self._subscription_server_count(subscription))
+        status_label = self._subscription_status_label(subscription)
+        suffix = f" | {source_label} | {servers_label} | {status_label}"
+        title_width = max(18, self.console.width - 10 - self._display_width(suffix))
+        title = self._truncate_display_width(self._layout_safe_text(subscription.title), title_width)
         return self._truncate_display_width(
-            self._layout_safe_text(subscription.title),
+            f"{title}{suffix}",
             max(18, self.console.width - 10),
         )
 
     def _subscription_status_label(self, subscription: SubscriptionEntry) -> str:
         if subscription.last_error:
-            return "Ошибка"
-        if not self._subscription_servers(subscription.id):
-            return "Пусто"
-        return "OK"
+            return "Нужна проверка"
+        if not self._subscription_server_count(subscription):
+            return "Пустая"
+        return "Готова"
 
     def _subscription_row_style(self, subscription: SubscriptionEntry) -> str:
         if subscription.last_error:
             return "bold red"
-        if not self._subscription_servers(subscription.id):
+        if not self._subscription_server_count(subscription):
             return "yellow"
         return "green"
 
     def _subscription_panel_border_style(self, subscription: SubscriptionEntry) -> str:
         if subscription.last_error:
             return "red"
-        if not self._subscription_servers(subscription.id):
+        if not self._subscription_server_count(subscription):
             return "yellow"
         return "cyan"
 
     def _subscription_details_panel(self, subscription: SubscriptionEntry) -> Panel:
         subscription_servers = self._subscription_servers(subscription.id)
+        server_count = len(subscription_servers)
         table = Table(show_header=False, box=None, pad_edge=False)
         table.add_column("Параметр", no_wrap=True, style="bold")
         table.add_column("Значение", overflow="fold", max_width=max(34, self.console.width - 34))
         table.add_row("Название", self._ui_subscription_title(subscription.title))
+        table.add_row("Источник", self._subscription_source_label(subscription), style="dim")
         table.add_row("URL", subscription.url)
-        table.add_row("Серверов", str(len(subscription_servers)), style="green" if subscription_servers else "yellow")
-        table.add_row("Обновлено", self._shorten_text(subscription.updated_at, 19), style="dim")
-        table.add_row("Статус", self._subscription_status_label(subscription), style=self._subscription_row_style(subscription))
+        table.add_row("Состояние", self._subscription_status_label(subscription), style=self._subscription_row_style(subscription))
+        table.add_row("Серверы", self._subscription_servers_label(server_count), style="green" if subscription_servers else "yellow")
+        table.add_row("Что это значит", self._subscription_status_hint(subscription), style="dim")
+        table.add_row("Последнее обновление", self._shorten_text(subscription.updated_at, 19), style="dim")
+        table.add_row("Следующий шаг", self._subscription_next_step(subscription), style="cyan" if not subscription.last_error else "yellow")
         if subscription.last_error:
             table.add_row("Последняя ошибка", subscription.last_error, style="red")
-            table.add_row("Когда", self._shorten_text(subscription.last_error_at or "-", 19), style="dim")
+            table.add_row("Когда возникла", self._shorten_text(subscription.last_error_at or "-", 19), style="dim")
         return Panel.fit(
             table,
             title=f"Подписка: {self._ui_subscription_title(subscription.title)}",
             border_style=self._subscription_panel_border_style(subscription),
         )
+
+    def _subscription_server_count(self, subscription: SubscriptionEntry) -> int:
+        return len(self._subscription_servers(subscription.id))
+
+    @classmethod
+    def _subscription_servers_label(cls, count: int) -> str:
+        return f"{count} {cls._pluralize_ru(count, 'сервер', 'сервера', 'серверов')}"
+
+    @staticmethod
+    def _pluralize_ru(count: int, one: str, few: str, many: str) -> str:
+        normalized = abs(int(count)) % 100
+        if 11 <= normalized <= 14:
+            return many
+        remainder = normalized % 10
+        if remainder == 1:
+            return one
+        if 2 <= remainder <= 4:
+            return few
+        return many
+
+    def _subscription_source_label(self, subscription: SubscriptionEntry) -> str:
+        parsed = urlparse(subscription.url)
+        source = (parsed.netloc or "").strip().lower() or subscription.url.strip()
+        return self._shorten_text(source or "-", 22)
+
+    def _subscription_next_step(self, subscription: SubscriptionEntry) -> str:
+        if subscription.last_error:
+            return "Проверьте URL и запустите обновление снова."
+        if not self._subscription_server_count(subscription):
+            return "Попробуйте обновить подписку или проверить источник."
+        return "Можно открыть список серверов или обновить подписку вручную."
+
+    def _subscription_status_hint(self, subscription: SubscriptionEntry) -> str:
+        if subscription.last_error:
+            return "Последняя попытка обновления завершилась ошибкой."
+        if not self._subscription_server_count(subscription):
+            return "Подписка сохранена, но серверы пока не загружены."
+        return "Подписка загружена и готова к использованию."
 
     def _subscription_servers(self, subscription_id: str) -> list[ServerEntry]:
         servers = [
@@ -3479,6 +4107,31 @@ class VynexVpnApp:
             )
         )
 
+    def _show_runtime_auto_install_notice(
+        self,
+        *,
+        components: list[str],
+        title: str,
+        server_name: str | None = None,
+        routing_name: str | None = None,
+    ) -> None:
+        if not components:
+            return
+        table = Table(show_header=False, box=None, pad_edge=False)
+        table.add_column("Параметр", no_wrap=True, style="bold")
+        table.add_column("Значение", overflow="fold", max_width=max(34, self.console.width - 34))
+        if server_name is not None:
+            table.add_row("Сервер", server_name)
+        if routing_name is not None:
+            table.add_row("Маршрут", routing_name)
+        table.add_row("Отсутствует", ", ".join(components))
+        table.add_row(
+            "Действие",
+            "Клиент автоматически подготовит недостающие компоненты и при необходимости догрузит их. Это может занять некоторое время.",
+        )
+        self._render_screen()
+        self.console.print(Panel.fit(table, title=title, border_style="yellow"))
+
     def _show_component_result(self, title: str, component_name: str) -> None:
         self._render_screen()
         self.console.print(
@@ -3525,7 +4178,7 @@ class VynexVpnApp:
         if state.system_proxy_enabled:
             state.system_proxy_enabled = False
             state.previous_system_proxy = None
-            self.storage.save_runtime_state(state)
+            self._save_runtime_state(state)
         self._render_screen()
         self.console.print(
             Panel.fit(
@@ -3540,6 +4193,29 @@ class VynexVpnApp:
     def _component_choice_label(label: str, path: Path) -> str:
         status = "есть" if path.exists() else "отсутствует"
         return f"{label}: {status}"
+
+    def _xray_component_label(self) -> str:
+        if not XRAY_EXECUTABLE.exists():
+            return "Xray-core: отсутствует"
+        version = self._xray_version_text()
+        if version is None:
+            return "Xray-core: есть (версия: неизвестна)"
+        return f"Xray-core: есть ({self._display_version(version)})"
+
+    def _xray_version_status_label(self) -> str:
+        if not XRAY_EXECUTABLE.exists():
+            return "не установлен"
+        version = self._xray_version_text()
+        if version is None:
+            return "версия не определена"
+        return self._display_version(version)
+
+    @staticmethod
+    def _xray_version_text() -> str | None:
+        version = XrayInstaller.get_xray_version(XRAY_EXECUTABLE)
+        if version is None:
+            return None
+        return ".".join(str(part) for part in version)
 
     @staticmethod
     def _amneziawg_component_label() -> str:
@@ -3685,7 +4361,7 @@ class VynexVpnApp:
         self._best_effort_stop_managed_instances(getattr(self, "amneziawg_process_manager", None))
         self._best_effort_disable_vynex_proxy()
         try:
-            self.storage.save_runtime_state(RuntimeState())
+            self._reset_runtime_state()
         except Exception:
             pass
         state_file = getattr(error, "path", None)
@@ -3884,25 +4560,65 @@ class VynexVpnApp:
         routing_profile=None,
     ) -> None:
         if server is None or routing_profile is None:
+            missing_components = self._missing_startup_runtime_components()
+            if mode == "TUN" and not WINTUN_DLL.exists():
+                missing_components.append("wintun.dll")
+            if missing_components:
+                self._show_runtime_auto_install_notice(
+                    components=missing_components,
+                    title="Подготовка runtime",
+                )
             if mode == "TUN":
                 self.installer.ensure_xray_tun_runtime()
                 return
             self.installer.ensure_xray()
             return
-        backend = self._backend_for_connection(
-            BackendConnectionProfile(
-                server=server,
-                mode=mode,
-                routing_profile=routing_profile,
-            )
+        connection_profile = BackendConnectionProfile(
+            server=server,
+            mode=mode,
+            routing_profile=routing_profile,
         )
+        backend = self._backend_for_connection(connection_profile)
+        missing_components = self._missing_connection_runtime_components(connection_profile)
+        if missing_components:
+            self._show_runtime_auto_install_notice(
+                components=missing_components,
+                title="Идет подключение",
+                server_name=self._ui_server_name(server.name),
+                routing_name=self._routing_display_name(backend.backend_id, getattr(routing_profile, "name", None)),
+            )
         backend.ensure_runtime_ready(
-            BackendConnectionProfile(
-                server=server,
-                mode=mode,
-                routing_profile=routing_profile,
-            )
+            connection_profile
         )
+
+    @staticmethod
+    def _missing_startup_runtime_components() -> list[str]:
+        missing_components: list[str] = []
+        if not XRAY_EXECUTABLE.exists():
+            missing_components.append("Xray-core (xray.exe)")
+        if not GEOIP_PATH.exists():
+            missing_components.append("geoip.dat")
+        if not GEOSITE_PATH.exists():
+            missing_components.append("geosite.dat")
+        return missing_components
+
+    def _missing_connection_runtime_components(self, profile: BackendConnectionProfile) -> list[str]:
+        backend = self._backend_for_connection(profile)
+        if backend.backend_id == "singbox":
+            return ["sing-box (sing-box.exe)"] if not SINGBOX_EXECUTABLE.exists() else []
+        if backend.backend_id == "amneziawg":
+            missing_components: list[str] = []
+            if not AMNEZIAWG_EXECUTABLE.exists():
+                missing_components.append("AmneziaWG (amneziawg.exe)")
+            if not AMNEZIAWG_EXECUTABLE_FALLBACK.exists():
+                missing_components.append("AWG helper (awg.exe)")
+            if not AMNEZIAWG_WINTUN_DLL.exists():
+                missing_components.append("wintun.dll")
+            return missing_components
+        missing_components = self._missing_startup_runtime_components()
+        if profile.normalized_mode == "TUN" and not WINTUN_DLL.exists():
+            missing_components.append("wintun.dll")
+        return missing_components
 
     @staticmethod
     def _pause() -> None:
@@ -3927,18 +4643,17 @@ class VynexVpnApp:
         choice_title = VynexVpnApp._choice_title(choice)
         if choice_title not in {"Назад", "Выход"}:
             return choice
-        formatted_title = [("class:terminal-danger", choice_title)]
+        return VynexVpnApp._styled_choice(choice, style_class="terminal-danger")
+
+    @staticmethod
+    def _styled_choice(choice: object, *, style_class: str) -> object:
         if isinstance(choice, str):
-            return Choice(title=formatted_title, value=choice)
+            styled_choice = Choice(title=choice, value=choice)
+            setattr(styled_choice, "_vynex_style_class", style_class)
+            return styled_choice
         if isinstance(choice, Choice):
-            return Choice(
-                title=formatted_title,
-                value=choice.value,
-                disabled=choice.disabled,
-                checked=choice.checked,
-                shortcut_key=choice.shortcut_key,
-                description=choice.description,
-            )
+            setattr(choice, "_vynex_style_class", style_class)
+            return choice
         return choice
 
     @staticmethod
@@ -3963,8 +4678,31 @@ class VynexVpnApp:
     def _menu_select_style(base_style: Style | None = None) -> Style:
         style_rules = list(base_style.style_rules) if base_style is not None else []
         style_rules.append(("terminal-danger", "fg:ansired bold"))
+        style_rules.append(("best-ping", "fg:ansigreen bold"))
+        style_rules.append(("settings-value", "fg:ansiblue bold"))
         style_rules.append(("instruction", "fg:ansicyan"))
         return Style(style_rules)
+
+    @staticmethod
+    def _shortcut_action_key_variants(keys_to_bind: tuple[object, ...]) -> tuple[object, ...]:
+        variants: list[object] = []
+        reverse_layout_map = {value: key for key, value in PHYSICAL_KEY_LAYOUT_MAP.items()}
+        for key in keys_to_bind:
+            if key not in variants:
+                variants.append(key)
+            if not isinstance(key, str) or len(key) != 1:
+                continue
+            normalized_key = key.lower()
+            mapped_key = PHYSICAL_KEY_LAYOUT_MAP.get(normalized_key) or reverse_layout_map.get(normalized_key)
+            if mapped_key is not None and mapped_key not in variants:
+                variants.append(mapped_key)
+        return tuple(variants)
+
+    @staticmethod
+    def _shortcut_action_binding_variants(keys_to_bind: tuple[object, ...]) -> tuple[tuple[object, ...], ...]:
+        if len(keys_to_bind) != 1:
+            return (keys_to_bind,)
+        return tuple((variant,) for variant in VynexVpnApp._shortcut_action_key_variants(keys_to_bind))
 
     @staticmethod
     def _back_choice_value(choices: object) -> object | None:
@@ -4106,15 +4844,17 @@ class VynexVpnApp:
             for keys, action_name in shortcut_actions:
 
                 def _register_action(keys_to_bind, registered_action):
-                    @bindings.add(*keys_to_bind, eager=True, filter=search_inactive)
-                    def trigger_action(event):
-                        ic.is_answered = True
-                        event.app.exit(
-                            result=SelectActionResult(
-                                action=registered_action,
-                                value=ic.get_pointed_at().value,
+                    for binding_keys in VynexVpnApp._shortcut_action_binding_variants(tuple(keys_to_bind)):
+
+                        @bindings.add(*binding_keys, eager=True, filter=search_inactive)
+                        def trigger_action(event):
+                            ic.is_answered = True
+                            event.app.exit(
+                                result=SelectActionResult(
+                                    action=registered_action,
+                                    value=ic.get_pointed_at().value,
+                                )
                             )
-                        )
 
                 _register_action(keys, action_name)
 
@@ -4185,7 +4925,7 @@ class VynexVpnApp:
 
     @staticmethod
     def _server_manager_instruction() -> str:
-        return "Enter - открыть, Del - удалить, E - редактировать, R - обновить ping, / - фильтр, Esc - назад"
+        return "Enter - открыть, Del - удалить, E - редактировать, R - обновить ping у всех, / - фильтр, Esc - назад"
 
     @staticmethod
     def _subscription_manager_instruction() -> str:

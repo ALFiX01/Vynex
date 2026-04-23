@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from questionary import Choice
+from questionary.prompts.select import Keys
 from rich.console import Console
 
 from vynex_vpn_client.app import (
@@ -14,8 +15,10 @@ from vynex_vpn_client.app import (
     TerminalInquirerControl,
     VynexVpnApp,
 )
-from vynex_vpn_client.backends import BaseVpnBackend
+from vynex_vpn_client.backends import BaseVpnBackend, BackendConnectionProfile
+from vynex_vpn_client.constants import DEFAULT_CONSOLE_COLUMNS, DEFAULT_CONSOLE_LINES
 from vynex_vpn_client.models import AppSettings, RuntimeState, ServerEntry, SubscriptionEntry
+from vynex_vpn_client.parsers import parse_share_link
 from vynex_vpn_client.process_manager import State as XrayState
 from vynex_vpn_client.storage import StorageCorruptionError
 from vynex_vpn_client.system_proxy import SystemProxyState
@@ -66,6 +69,8 @@ def _make_app(*, runtime_state: RuntimeState, manager_state: XrayState, manager_
         "xray": xray_backend,
         "amneziawg": awg_backend,
     }
+    app._startup_subscription_refresh_thread = None
+    app._console_window_size = None
     app._proxy_session = None
     app._runtime_notice = None
     app._disconnect_runtime = Mock()
@@ -133,6 +138,170 @@ def test_render_screen_uses_runtime_notice_title() -> None:
     assert app._runtime_notice is None
 
 
+def test_render_screen_hides_banner_by_default() -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+    app.logo = "VYNEX"
+
+    with patch("vynex_vpn_client.app.os.system"):
+        app._render_screen()
+
+    output = app.console.export_text()
+    assert "VYNEX" not in output
+
+
+def test_render_screen_shows_banner_when_requested() -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+    app.logo = "VYNEX"
+
+    with patch("vynex_vpn_client.app.os.system"):
+        app._render_screen(show_banner=True)
+
+    output = app.console.export_text()
+    assert "VYNEX" in output
+
+
+def test_list_console_window_size_grows_for_large_lists() -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+
+    columns, lines = app._list_console_window_size(26, baseline_items=10)
+
+    assert columns == DEFAULT_CONSOLE_COLUMNS
+    assert lines > DEFAULT_CONSOLE_LINES
+
+
+def test_server_manager_console_window_size_is_wider_than_default() -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+
+    columns, lines = app._server_manager_console_window_size(30)
+
+    assert columns > DEFAULT_CONSOLE_COLUMNS
+    assert lines > DEFAULT_CONSOLE_LINES
+    assert lines <= DEFAULT_CONSOLE_LINES + 8
+
+
+def test_server_manager_console_window_size_does_not_grow_for_medium_lists() -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+
+    columns, lines = app._server_manager_console_window_size(18)
+
+    assert columns > DEFAULT_CONSOLE_COLUMNS
+    assert lines == DEFAULT_CONSOLE_LINES
+
+
+def test_apply_console_window_size_skips_duplicate_mode_command() -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+
+    with (
+        patch("vynex_vpn_client.app.os.system") as system_mock,
+        patch("vynex_vpn_client.app.sys.platform", "win32"),
+        patch("vynex_vpn_client.app.sys.stdout", SimpleNamespace(isatty=lambda: True)),
+    ):
+        app._apply_console_window_size(150, 55)
+        app._apply_console_window_size(150, 55)
+
+    system_mock.assert_called_once_with("mode con cols=150 lines=55 > nul")
+
+
+def test_ensure_xray_ready_shows_notice_when_runtime_components_missing() -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+    app.installer = Mock()
+    app.installer.warnings = []
+    app._show_runtime_auto_install_notice = Mock()
+
+    with patch.object(VynexVpnApp, "_missing_startup_runtime_components", return_value=["geoip.dat"]):
+        app._ensure_xray_ready()
+
+    app._show_runtime_auto_install_notice.assert_called_once_with(
+        components=["geoip.dat"],
+        title="Подготовка приложения",
+    )
+    app.installer.ensure_xray.assert_called_once_with()
+
+
+def test_missing_connection_runtime_components_for_awg_lists_all_missing_files(tmp_path: Path) -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+    app._backend_for_connection = Mock(return_value=SimpleNamespace(backend_id="amneziawg"))
+    profile = BackendConnectionProfile(
+        server=ServerEntry.new(
+            name="AWG",
+            protocol="amneziawg",
+            host="example.com",
+            port=51820,
+            raw_link="amneziawg://example",
+            extra={"id": "awg-test"},
+        ),
+        mode="TUN",
+        routing_profile=SimpleNamespace(name="AWG"),
+    )
+
+    with (
+        patch("vynex_vpn_client.app.AMNEZIAWG_EXECUTABLE", tmp_path / "amneziawg.exe"),
+        patch("vynex_vpn_client.app.AMNEZIAWG_EXECUTABLE_FALLBACK", tmp_path / "awg.exe"),
+        patch("vynex_vpn_client.app.AMNEZIAWG_WINTUN_DLL", tmp_path / "wintun.dll"),
+    ):
+        missing = app._missing_connection_runtime_components(profile)
+
+    assert missing == [
+        "AmneziaWG (amneziawg.exe)",
+        "AWG helper (awg.exe)",
+        "wintun.dll",
+    ]
+
+
+def test_ensure_runtime_ready_shows_connection_notice_when_components_missing() -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+    backend = Mock()
+    backend.backend_id = "xray"
+    app._backend_for_connection = Mock(return_value=backend)
+    app._missing_connection_runtime_components = Mock(return_value=["Xray-core (xray.exe)"])
+    app._show_runtime_auto_install_notice = Mock()
+    server = ServerEntry.new(
+        name="Test server",
+        protocol="vless",
+        host="example.com",
+        port=443,
+        raw_link="vless://test@example.com:443",
+        extra={"id": "ensure-runtime-server"},
+    )
+    routing_profile = SimpleNamespace(name="Default")
+
+    app._ensure_runtime_ready("PROXY", server=server, routing_profile=routing_profile)
+
+    app._show_runtime_auto_install_notice.assert_called_once_with(
+        components=["Xray-core (xray.exe)"],
+        title="Идет подключение",
+        server_name="Test server",
+        routing_name="Default",
+    )
+    backend.ensure_runtime_ready.assert_called_once()
+
+
+def test_xray_component_label_includes_detected_version(tmp_path: Path) -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+    xray_path = tmp_path / "xray.exe"
+    xray_path.write_bytes(b"")
+
+    with (
+        patch("vynex_vpn_client.app.XRAY_EXECUTABLE", xray_path),
+        patch.object(VynexVpnApp, "_xray_version_text", return_value="26.3.27"),
+    ):
+        assert app._xray_component_label() == "Xray-core: есть (v26.3.27)"
+
+
+def test_status_flow_shows_xray_version_when_not_connected() -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+    app.logo = ""
+    app._render_screen = Mock()
+    app._pause = Mock()
+    app._xray_version_status_label = Mock(return_value="v26.3.27")
+
+    app.status_flow()
+
+    output = app.console.export_text()
+    assert "Xray-core" in output
+    assert "v26.3.27" in output
+
+
 def test_banner_status_line_shows_xray_recovery() -> None:
     state = RuntimeState(
         pid=1001,
@@ -185,28 +354,42 @@ def test_startup_auto_refresh_subscriptions_uses_global_setting() -> None:
     app.storage.load_subscriptions.return_value = [Mock()]
     app.subscription_manager = Mock()
     app.subscription_manager.refresh_all.return_value = ([], [])
+    thread = Mock()
 
-    app._startup_auto_refresh_subscriptions()
+    with patch("vynex_vpn_client.app.threading.Thread", return_value=thread) as thread_factory:
+        app._startup_auto_refresh_subscriptions()
 
-    app.subscription_manager.refresh_all.assert_called_once_with(only_auto_update=True)
+    thread_factory.assert_called_once()
+    thread.start.assert_called_once_with()
+    app.subscription_manager.refresh_all.assert_not_called()
     assert app._runtime_notice is None
 
 
 def test_startup_auto_refresh_subscriptions_sets_notice_on_failures() -> None:
     app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
-    app._validated_settings.return_value = AppSettings(auto_update_subscriptions_on_startup=True)
     failed_subscription = Mock()
     failed_subscription.title = "Problem sub"
-    app.storage.load_subscriptions.return_value = [failed_subscription]
     app.subscription_manager = Mock()
     app.subscription_manager.refresh_all.return_value = ([], [(failed_subscription, "timeout")])
 
-    app._startup_auto_refresh_subscriptions()
+    app._refresh_subscriptions_on_startup_in_background()
 
     assert app._runtime_notice is not None
     assert "С ошибками: 1" in app._runtime_notice.message
     assert "Problem sub: timeout" in app._runtime_notice.message
     assert app._runtime_notice.title == "Авто-обновление подписок"
+
+
+def test_startup_auto_refresh_subscriptions_skips_when_background_thread_is_alive() -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+    app._startup_subscription_refresh_thread = Mock(is_alive=Mock(return_value=True))
+    app._validated_settings.return_value = AppSettings(auto_update_subscriptions_on_startup=True)
+    app.storage.load_subscriptions.return_value = [Mock()]
+
+    with patch("vynex_vpn_client.app.threading.Thread") as thread_factory:
+        app._startup_auto_refresh_subscriptions()
+
+    thread_factory.assert_not_called()
 
 
 def test_runtime_pid_label_shows_restart_marker_while_xray_recovers() -> None:
@@ -232,6 +415,104 @@ def test_server_choice_title_uses_console_safe_name() -> None:
     assert "[U+1F680]" in title
 
 
+def test_server_choice_title_includes_tcp_ping_when_provided() -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+
+    title = app._server_choice_title(
+        "srv",
+        "VMESS",
+        "example.com:443",
+        20,
+        5,
+        tcp_ping_label="24 ms",
+        ping_width=5,
+    )
+
+    assert title.endswith("| 24 ms")
+
+
+def test_server_choice_title_aligns_address_column_when_width_is_provided() -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+
+    short_title = app._server_choice_title(
+        "srv",
+        "VMESS",
+        "a:1",
+        20,
+        5,
+        address_width=20,
+        tcp_ping_label="24 ms",
+        ping_width=5,
+    )
+    long_title = app._server_choice_title(
+        "srv",
+        "VMESS",
+        "very-long-host.example:443",
+        20,
+        5,
+        address_width=20,
+        tcp_ping_label="24 ms",
+        ping_width=5,
+    )
+
+    assert short_title.index("| 24 ms") == long_title.index("| 24 ms")
+
+
+def test_best_cached_tcp_ping_server_id_returns_lowest_latency_server() -> None:
+    slow = ServerEntry.new(
+        name="Slow",
+        protocol="vless",
+        host="slow.example.com",
+        port=443,
+        raw_link="",
+        extra={"id": "slow-id", "tcp_ping_ok": True, "tcp_ping_ms": 78},
+    )
+    fast = ServerEntry.new(
+        name="Fast",
+        protocol="vless",
+        host="fast.example.com",
+        port=443,
+        raw_link="",
+        extra={"id": "fast-id", "tcp_ping_ok": True, "tcp_ping_ms": 24},
+    )
+    failed = ServerEntry.new(
+        name="Failed",
+        protocol="vless",
+        host="failed.example.com",
+        port=443,
+        raw_link="",
+        extra={"id": "failed-id", "tcp_ping_ok": False, "tcp_ping_error": "timeout"},
+    )
+
+    best_server_id = VynexVpnApp._best_cached_tcp_ping_server_id([slow, failed, fast])
+
+    assert best_server_id == fast.id
+
+
+def test_connect_server_choice_highlights_lowest_ping_server() -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+    server = ServerEntry.new(
+        name="Fast",
+        protocol="vless",
+        host="fast.example.com",
+        port=443,
+        raw_link="",
+        extra={"id": "fast-id", "tcp_ping_ok": True, "tcp_ping_ms": 24},
+    )
+
+    choice = app._connect_server_choice(
+        server,
+        name_width=20,
+        protocol_width=5,
+        address_width=20,
+        ping_width=5,
+        is_best=True,
+    )
+
+    assert choice.title.startswith("Fast")
+    assert getattr(choice, "_vynex_style_class", None) == "best-ping"
+
+
 def test_server_manager_choice_title_truncates_long_names() -> None:
     app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
     app.console = Console(width=50, record=True)
@@ -246,8 +527,37 @@ def test_server_manager_choice_title_truncates_long_names() -> None:
 
     title = app._server_manager_choice_title(server, active_server_id=None)
 
-    assert title.endswith("...")
-    assert app._display_width(title) <= 27
+    assert "VMESS" in title
+    assert "31.192.111.158:12667" not in title
+    assert "ручной" not in title
+    assert "..." in title
+    assert app._display_width(title) <= 44
+
+
+def test_server_manager_choice_title_includes_server_metadata() -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+    app.console = Console(width=138, record=True)
+    subscription = SubscriptionEntry.new(url="https://subs.eu-fffast.com", title="subs.eu-fffast.com")
+    app.storage.get_subscription.return_value = subscription
+    server = ServerEntry.new(
+        name="[FI] 🎮 Игровой 1",
+        protocol="vless",
+        host="test.wide-frost.test-cdn-kkk.com",
+        port=8443,
+        raw_link="vless://example",
+        source="subscription",
+        subscription_id=subscription.id,
+        extra={"id": "manager-choice-server", "tcp_ping_ms": 25, "tcp_ping_ok": True},
+    )
+
+    title = app._server_manager_choice_title(server, active_server_id=server.id)
+
+    assert "[FI]" in title
+    assert "VLESS" in title
+    assert "test.wide-frost.test-cdn-kkk.com:8443" in title
+    assert "подписка (subs.eu-fffast.com)" in title
+    assert "Активен" in title
+    assert title.endswith("25 ms")
 
 
 def test_servers_table_truncates_long_names_without_wrapping() -> None:
@@ -339,6 +649,82 @@ def test_back_choice_value_returns_none_without_back_option() -> None:
     assert VynexVpnApp._back_choice_value(["Открыть", "Выход"]) is None
 
 
+def test_menu_select_style_includes_best_ping_style() -> None:
+    style = VynexVpnApp._menu_select_style()
+
+    assert ("best-ping", "fg:ansigreen bold") in style.style_rules
+
+
+def test_menu_select_style_includes_settings_value_style() -> None:
+    style = VynexVpnApp._menu_select_style()
+
+    assert ("settings-value", "fg:ansiblue bold") in style.style_rules
+
+
+def test_shortcut_action_key_variants_include_russian_layout_equivalent() -> None:
+    variants = VynexVpnApp._shortcut_action_key_variants(("r",))
+
+    assert variants == ("r", "к")
+
+
+def test_shortcut_action_key_variants_leave_special_keys_unchanged() -> None:
+    variants = VynexVpnApp._shortcut_action_key_variants((Keys.Delete,))
+
+    assert variants == (Keys.Delete,)
+
+
+def test_shortcut_action_binding_variants_register_layout_alternatives_separately() -> None:
+    variants = VynexVpnApp._shortcut_action_binding_variants(("r",))
+
+    assert variants == (("r",), ("к",))
+
+
+def test_shortcut_action_binding_variants_keep_special_keys_as_single_binding() -> None:
+    variants = VynexVpnApp._shortcut_action_binding_variants((Keys.Delete,))
+
+    assert variants == ((Keys.Delete,),)
+
+
+def test_terminal_inquirer_control_keeps_shortcuts_for_styled_string_choices() -> None:
+    choice = VynexVpnApp._styled_choice(Choice(title="Fast server", value="fast"), style_class="best-ping")
+    control = TerminalInquirerControl(
+        choices=[choice, Choice(title="Fallback", value="fallback")],
+        use_shortcuts=True,
+        use_indicator=False,
+        pointer=None,
+    )
+
+    rendered = "".join(text for _, text in control._get_choice_tokens())
+
+    assert "1) Fast server" in rendered
+
+
+def test_terminal_inquirer_control_keeps_shortcuts_for_formatted_choice_titles() -> None:
+    control = TerminalInquirerControl(
+        choices=[
+            VynexVpnApp._settings_menu_choice("Режим подключения: ", "TUN"),
+            Choice(title="Назад", value="__back__"),
+        ],
+        use_shortcuts=True,
+        use_indicator=False,
+        pointer=None,
+    )
+
+    rendered = "".join(text for _, text in control._get_choice_tokens())
+
+    assert "1) Режим подключения: TUN" in rendered
+
+
+def test_settings_menu_choice_formats_value_with_separate_style() -> None:
+    choice = VynexVpnApp._settings_menu_choice("Режим подключения: ", "TUN")
+
+    assert choice.value == "Режим подключения: TUN"
+    assert choice.title == [
+        ("class:text", "Режим подключения: "),
+        ("class:settings-value", "TUN"),
+    ]
+
+
 def test_show_servers_overview_refreshes_tcp_ping_on_open() -> None:
     app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
     server = ServerEntry.new(
@@ -359,6 +745,132 @@ def test_show_servers_overview_refreshes_tcp_ping_on_open() -> None:
     app._show_servers_overview()
 
     app._refresh_servers_tcp_ping_cache.assert_called_once()
+    app._render_screen.assert_called_with(window_size=app._server_manager_console_window_size(1))
+
+
+def test_server_subscription_flow_exposes_quick_import_at_top_level() -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+    app.storage.load_servers.return_value = []
+    app.storage.load_subscriptions.return_value = []
+    app._render_screen = Mock()
+    app.add_server_flow = Mock()
+    app._show_servers_overview = Mock()
+    app._show_subscriptions_overview = Mock()
+    app._select = Mock(
+        side_effect=[
+            SimpleNamespace(ask=Mock(return_value="__add__")),
+            SimpleNamespace(ask=Mock(return_value="Назад")),
+        ]
+    )
+
+    app.server_subscription_flow()
+
+    choices = app._select.call_args_list[0].kwargs["choices"]
+    assert any(isinstance(choice, Choice) and choice.value == "__add__" for choice in choices)
+    app.add_server_flow.assert_called_once()
+
+
+def test_show_servers_overview_menu_does_not_include_quick_import_or_ping_action_choice() -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+    server = ServerEntry.new(
+        name="Open test",
+        protocol="vless",
+        host="example.com",
+        port=443,
+        raw_link="",
+        extra={"id": "open-id"},
+    )
+    app.storage.load_servers.return_value = [server]
+    app._render_screen = Mock()
+    app._current_state = Mock(return_value=RuntimeState())
+    app._refresh_servers_tcp_ping_cache = Mock(return_value=[server])
+    app._select = Mock(return_value=SimpleNamespace(ask=Mock(return_value="__back__")))
+    app.console.print = Mock()
+
+    app._show_servers_overview()
+
+    choices = app._select.call_args.kwargs["choices"]
+    assert not any(isinstance(choice, Choice) and choice.value == "__add__" for choice in choices)
+    assert not any(isinstance(choice, Choice) and choice.value == "__tcp_ping_all__" for choice in choices)
+
+
+def test_show_servers_overview_does_not_render_duplicate_servers_table() -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+    server = ServerEntry.new(
+        name="Open test",
+        protocol="vless",
+        host="example.com",
+        port=443,
+        raw_link="",
+        extra={"id": "open-id"},
+    )
+    app.storage.load_servers.return_value = [server]
+    app._render_screen = Mock()
+    app._current_state = Mock(return_value=RuntimeState())
+    app._refresh_servers_tcp_ping_cache = Mock(return_value=[server])
+    app._select = Mock(return_value=SimpleNamespace(ask=Mock(return_value="__back__")))
+    app.console.print = Mock()
+
+    app._show_servers_overview()
+
+    app.console.print.assert_not_called()
+
+
+def test_show_subscriptions_overview_menu_does_not_include_quick_import_choice() -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+    subscription = SubscriptionEntry.new(url="https://example.com/sub", title="Example")
+    app.storage.load_subscriptions.return_value = [subscription]
+    app.storage.load_servers.return_value = []
+    app._render_screen = Mock()
+    app._select = Mock(return_value=SimpleNamespace(ask=Mock(return_value="__back__")))
+    app.console.print = Mock()
+
+    app._show_subscriptions_overview()
+
+    choices = app._select.call_args.kwargs["choices"]
+    assert not any(isinstance(choice, Choice) and choice.value == "__add__" for choice in choices)
+
+
+def test_subscription_choice_title_includes_source_count_and_status() -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+    subscription = SubscriptionEntry.new(url="https://example.com/sub", title="Example")
+    app.storage.load_servers.return_value = [
+        ServerEntry.new(
+            name="Imported",
+            protocol="vless",
+            host="example.com",
+            port=443,
+            raw_link="",
+            source="subscription",
+            subscription_id=subscription.id,
+        )
+    ]
+
+    title = app._subscription_choice_title(subscription)
+
+    assert "Example" in title
+    assert "example.com" in title
+    assert "1 сервер" in title
+    assert "Готова" in title
+
+
+def test_subscription_details_panel_explains_error_state_and_next_step() -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+    subscription = SubscriptionEntry.new(url="https://example.com/sub", title="Example")
+    subscription.last_error = "timeout"
+    subscription.last_error_at = "2026-04-21T18:00:00+00:00"
+    app.storage.load_servers.return_value = []
+
+    app.console.print(app._subscription_details_panel(subscription))
+    output = app.console.export_text()
+
+    assert "Источник" in output
+    assert "example.com" in output
+    assert "Что это значит" in output
+    assert "завершилась" in output
+    assert "ошибкой" in output
+    assert "Следующий шаг" in output
+    assert "Проверьте URL" in output
 
 
 def test_tcp_ping_results_table_sorts_rows_and_formats_ping_values() -> None:
@@ -506,13 +1018,37 @@ def test_persist_tcp_ping_results_can_preserve_other_cached_entries() -> None:
     app.storage.save_servers.assert_called_once_with([first, second])
 
 
-def test_handle_server_manager_shortcut_refreshes_selected_server_ping() -> None:
+def test_handle_server_manager_shortcut_refreshes_ping_for_all_servers() -> None:
     app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+    app._refresh_all_servers_manager_tcp_ping = Mock()
     app._refresh_server_tcp_ping_cache = Mock()
 
     app._handle_server_manager_shortcut(SelectActionResult(action="refresh", value="server-42"))
 
-    app._refresh_server_tcp_ping_cache.assert_called_once_with("server-42")
+    app._refresh_all_servers_manager_tcp_ping.assert_called_once_with()
+    app._refresh_server_tcp_ping_cache.assert_not_called()
+
+
+def test_refresh_all_servers_manager_tcp_ping_updates_cached_values_in_place() -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+    server = ServerEntry.new(
+        name="Refresh me",
+        protocol="vless",
+        host="example.com",
+        port=443,
+        raw_link="",
+        extra={"id": "refresh-id"},
+    )
+    app.storage.load_servers.return_value = [server]
+    app._refresh_servers_tcp_ping_cache = Mock(return_value=[server])
+
+    refreshed = app._refresh_all_servers_manager_tcp_ping()
+
+    assert refreshed == [server]
+    app._refresh_servers_tcp_ping_cache.assert_called_once_with(
+        [server],
+        status_message="[bold cyan]Обновляем TCP ping для 1 серверов...[/bold cyan]",
+    )
 
 
 def test_handle_subscription_manager_shortcut_refreshes_selected_subscription() -> None:
@@ -552,3 +1088,60 @@ def test_terminal_inquirer_control_filters_formatted_choice_titles() -> None:
 
     assert len(filtered) == 1
     assert filtered[0].value == "__back__"
+
+
+def test_error_guidance_for_import_surfaces_missing_server_credentials() -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+
+    try:
+        parse_share_link("vless://example.com:443#NoId")
+    except ValueError as exc:
+        summary, actions, details = app._error_guidance("Ошибка импорта", exc)
+    else:
+        raise AssertionError("parse_share_link should fail for VLESS URI without credentials")
+
+    assert summary == "В ссылке сервера нет обязательного идентификатора или пароля."
+    assert actions == [
+        "Для VLESS и VMess проверьте UUID перед символом @.",
+        "Для Trojan, Shadowsocks и Hysteria2 проверьте пароль или userinfo-часть ссылки.",
+    ]
+    assert details == "Некорректная ссылка сервера. Причина: В ссылке отсутствует идентификатор или пароль."
+
+
+def test_error_guidance_for_tun_admin_error_uses_source_launch_instructions() -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+
+    with (
+        patch("vynex_vpn_client.app.sys.platform", "win32"),
+        patch("vynex_vpn_client.app.sys.frozen", False, create=True),
+    ):
+        summary, actions, details = app._error_guidance(
+            "Ошибка подключения",
+            RuntimeError("TUN режим требует запуска приложения от имени администратора."),
+        )
+
+    assert summary == "Для TUN режима клиент должен быть запущен с правами администратора."
+    assert actions == [
+        "Закройте приложение, откройте PowerShell от имени администратора и запустите `python main.py`.",
+        "Если проект запускается из virtualenv, используйте `./.venv/Scripts/python.exe ./main.py`.",
+        "После перезапуска повторите подключение в режиме TUN.",
+    ]
+    assert details == "TUN режим требует запуска приложения от имени администратора."
+
+
+def test_show_error_for_import_surfaces_humanized_nested_reason() -> None:
+    app = _make_app(runtime_state=RuntimeState(), manager_state=XrayState.STOPPED)
+
+    try:
+        parse_share_link("ss://example.com:8388#NoCreds")
+    except ValueError as exc:
+        app._show_error("Ошибка импорта", exc)
+    else:
+        raise AssertionError("parse_share_link should fail for malformed Shadowsocks URI")
+
+    output = app.console.export_text()
+
+    assert "Ссылка сервера повреждена" in output
+    assert "или скопирована не" in output
+    assert "Причина: Ссылка" in output
+    assert "содержит поврежденные или неполные данные." in output

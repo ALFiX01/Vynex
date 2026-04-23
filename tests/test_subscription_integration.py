@@ -101,6 +101,27 @@ def test_parse_share_link_supports_reality_vless_with_emoji_fragment() -> None:
     assert server.extra["spider_x"] == "/"
 
 
+def test_parse_share_link_supports_wrapped_reality_vless() -> None:
+    link = (
+        "vless://89566221-ecc0-4c04-a62e-2ea06ff41156@app.mosru.dns.navy:443\n"
+        "?type=tcp&encryption=none&security=reality&pbk=mpZQfVQemnh-KC3d-9k98td8ZqvXyu4UtcyYxmjcrTY\n"
+        "&fp=chrome&sni=rutube.ru&sid=149c22c4d150e9f9&spx=/&flow=xtls-rprx-vision\n"
+        "#VLESS%20TCP%20%C2%B7%20Reality%20%C2%B7%20Rutube%20%C2%B7%20443"
+    )
+
+    server = parse_share_link(link)
+
+    assert server.protocol == "vless"
+    assert server.host == "app.mosru.dns.navy"
+    assert server.port == 443
+    assert server.name == "VLESS TCP · Reality · Rutube · 443"
+    assert server.extra["public_key"] == "mpZQfVQemnh-KC3d-9k98td8ZqvXyu4UtcyYxmjcrTY"
+    assert server.extra["short_id"] == "149c22c4d150e9f9"
+    assert server.extra["fingerprint"] == "chrome"
+    assert server.extra["flow"] == "xtls-rprx-vision"
+    assert server.extra["spider_x"] == "/"
+
+
 def test_app_detects_share_link_with_common_paste_artifacts() -> None:
     app = object.__new__(VynexVpnApp)
     wrapped = '\ufeff<"vless://id-1@example.com:443?security=reality&pbk=KEY&sid=SID#One">\u200b'
@@ -115,6 +136,25 @@ def test_app_detects_share_link_with_common_paste_artifacts() -> None:
     assert server.host == "example.com"
     assert server.extra["public_key"] == "KEY"
     assert server.extra["short_id"] == "SID"
+
+
+def test_app_detects_wrapped_share_link_as_single_server() -> None:
+    app = object.__new__(VynexVpnApp)
+    wrapped = (
+        "vless://89566221-ecc0-4c04-a62e-2ea06ff41156@app.mosru.dns.navy:443\n"
+        "?type=tcp&encryption=none&security=reality&pbk=mpZQfVQemnh-KC3d-9k98td8ZqvXyu4UtcyYxmjcrTY\n"
+        "&fp=chrome&sni=rutube.ru&sid=149c22c4d150e9f9&spx=/&flow=xtls-rprx-vision\n"
+        "#VLESS%20TCP%20%C2%B7%20Reality%20%C2%B7%20Rutube%20%C2%B7%20443"
+    )
+
+    import_kind, payload = app._detect_import_target(wrapped)
+    server = parse_share_link(str(payload))
+
+    assert import_kind == "server"
+    assert server.protocol == "vless"
+    assert server.host == "app.mosru.dns.navy"
+    assert server.extra["public_key"] == "mpZQfVQemnh-KC3d-9k98td8ZqvXyu4UtcyYxmjcrTY"
+    assert server.extra["short_id"] == "149c22c4d150e9f9"
 
 
 def test_fetch_subscription_servers_uses_v2rayn_user_agent() -> None:

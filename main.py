@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -20,6 +21,48 @@ def _project_venv_python() -> Path | None:
     else:
         candidate = root / ".venv" / "bin" / "python"
     return candidate if candidate.exists() else None
+
+
+def _is_running_as_admin() -> bool:
+    if sys.platform != "win32":
+        return False
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def _admin_relaunch_command() -> tuple[str, str | None]:
+    executable = str(Path(sys.executable).resolve())
+    if getattr(sys, "frozen", False):
+        arguments = sys.argv[1:]
+    else:
+        arguments = [str(Path(__file__).resolve()), *sys.argv[1:]]
+    parameters = subprocess.list2cmdline(arguments)
+    return executable, parameters or None
+
+
+def _ensure_running_as_admin() -> None:
+    if sys.platform != "win32" or _is_running_as_admin():
+        return
+    executable, parameters = _admin_relaunch_command()
+    working_directory = str(Path.cwd())
+    try:
+        result = ctypes.windll.shell32.ShellExecuteW(
+            None,
+            "runas",
+            executable,
+            parameters,
+            working_directory,
+            1,
+        )
+    except Exception as exc:
+        print("Не удалось перезапустить приложение с правами администратора.", file=sys.stderr)
+        raise SystemExit(1) from exc
+    if result <= 32:
+        print("Запуск от имени администратора был отменен или завершился ошибкой.", file=sys.stderr)
+        raise SystemExit(1)
+    raise SystemExit(0)
 
 
 def _print_missing_dependency(error: ModuleNotFoundError) -> None:
