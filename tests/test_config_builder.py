@@ -172,6 +172,50 @@ class XrayConfigBuilderTests(unittest.TestCase):
         self.assertEqual(outbound["streamSettings"]["wsSettings"]["path"], "/ws")
         self.assertEqual(outbound["streamSettings"]["wsSettings"]["headers"]["Host"], "cdn.example.com")
 
+    def test_tun_config_supports_reality_xhttp_server(self) -> None:
+        builder = XrayConfigBuilder()
+        config = builder.build(
+            server=ServerEntry.new(
+                name="Reality XHTTP",
+                protocol="vless",
+                host="185.80.91.169",
+                port=443,
+                raw_link="vless://test@example.com:443?type=xhttp",
+                extra={
+                    "id": "11111111-1111-1111-1111-111111111111",
+                    "network": "xhttp",
+                    "security": "reality",
+                    "public_key": "REALITYPUB",
+                    "short_id": "abcd1234",
+                    "fingerprint": "chrome",
+                    "sni": "reality.example.com",
+                    "host": "edge.example.com",
+                    "path": "/xhttp",
+                    "mode": "packet-up",
+                    "xhttp_extra": {"xmux": {"maxConcurrency": "1-2"}},
+                },
+            ),
+            mode="tun",
+            routing_profile=RoutingProfile(
+                profile_id="default",
+                name="default",
+                description="default",
+                rules=[],
+            ),
+            outbound_interface_name="Wi-Fi",
+        )
+
+        stream_settings = config["outbounds"][0]["streamSettings"]
+        self.assertEqual(stream_settings["network"], "xhttp")
+        self.assertEqual(stream_settings["security"], "reality")
+        self.assertEqual(stream_settings["realitySettings"]["serverName"], "reality.example.com")
+        self.assertEqual(stream_settings["realitySettings"]["publicKey"], "REALITYPUB")
+        self.assertEqual(stream_settings["xhttpSettings"]["host"], "edge.example.com")
+        self.assertEqual(stream_settings["xhttpSettings"]["path"], "/xhttp")
+        self.assertEqual(stream_settings["xhttpSettings"]["mode"], "packet-up")
+        self.assertEqual(stream_settings["xhttpSettings"]["extra"], {"xmux": {"maxConcurrency": "1-2"}})
+        self.assertEqual(stream_settings["sockopt"]["interface"], "Wi-Fi")
+
 
 if __name__ == "__main__":
     unittest.main()

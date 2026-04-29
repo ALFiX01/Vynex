@@ -13,7 +13,7 @@ from .process_manager import Server
 
 logger = logging.getLogger(__name__)
 
-_BASE64_BODY_RE = re.compile(r"[A-Za-z0-9+/=\-_\n]+")
+_BASE64_BODY_RE = re.compile(r"[A-Za-z0-9+/=\-_\r\n]+")
 _SKIP_SINGBOX_TYPES = {"direct", "block", "dns", "selector", "urltest"}
 _SUPPORTED_CLASH_TYPES = {"vless", "vmess", "trojan", "ss", "hy2", "hysteria2"}
 
@@ -323,4 +323,3 @@ def merge_servers(old: list[Server], fresh: list[Server]) -> list[Server]:
 
 def _server_key(server: Server) -> tuple[str, int, str]:
     return (server.address.lower(), server.port, server.uuid)
-

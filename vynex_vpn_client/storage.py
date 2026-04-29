@@ -196,6 +196,7 @@ class JsonStorage:
                     for other in servers
                 ):
                     raise ValueError("Сервер с такой ссылкой уже существует.")
+                self._preserve_local_server_flags(existing, server)
                 server.created_at = existing.created_at
                 servers[index] = server
                 return server
@@ -203,6 +204,7 @@ class JsonStorage:
             for index, existing in enumerate(servers):
                 if not self._same_server_identity(existing, server):
                     continue
+                self._preserve_local_server_flags(existing, server)
                 server.id = existing.id
                 server.created_at = existing.created_at
                 servers[index] = server
@@ -210,12 +212,19 @@ class JsonStorage:
         if server.raw_link:
             for index, existing in enumerate(servers):
                 if existing.raw_link == server.raw_link:
+                    self._preserve_local_server_flags(existing, server)
                     server.id = existing.id
                     server.created_at = existing.created_at
                     servers[index] = server
                     return server
         servers.append(server)
         return server
+
+    @staticmethod
+    def _preserve_local_server_flags(existing: ServerEntry, incoming: ServerEntry) -> None:
+        incoming.extra = dict(incoming.extra)
+        if existing.extra.get("favorite") and "favorite" not in incoming.extra:
+            incoming.extra["favorite"] = True
 
     def get_server(self, server_id: str) -> ServerEntry | None:
         return next((item for item in self.load_servers() if item.id == server_id), None)

@@ -1,17 +1,13 @@
 from __future__ import annotations
 
 import ctypes
+import importlib
 import os
 import subprocess
 import sys
 from pathlib import Path
 
-from vynex_vpn_client.constants import (
-    APP_NAME,
-    APP_VERSION,
-    DEFAULT_CONSOLE_COLUMNS,
-    DEFAULT_CONSOLE_LINES,
-)
+from vynex_vpn_client.constants import APP_NAME, APP_VERSION
 
 
 def _project_venv_python() -> Path | None:
@@ -106,10 +102,25 @@ def _maybe_reexec_with_project_venv(error: ModuleNotFoundError) -> None:
     )
 
 
-try:
-    from vynex_vpn_client.app import main
-except ModuleNotFoundError as error:
-    _maybe_reexec_with_project_venv(error)
+def _is_legacy_terminal_requested(argv: list[str] | None = None) -> bool:
+    args = list(sys.argv[1:] if argv is None else argv)
+    return "--terminal" in args or "--legacy-terminal" in args
+
+
+def _entrypoint_module_name(argv: list[str] | None = None) -> str:
+    if _is_legacy_terminal_requested(argv):
+        return "vynex_vpn_client.app"
+    return "vynex_vpn_client.gui.app"
+
+
+def _load_entrypoint(argv: list[str] | None = None):
+    module_name = _entrypoint_module_name(argv)
+    try:
+        module = importlib.import_module(module_name)
+    except ModuleNotFoundError as error:
+        _maybe_reexec_with_project_venv(error)
+        raise
+    return module.main
 
 
 def _set_console_title() -> None:
@@ -125,13 +136,21 @@ def _set_console_title() -> None:
 def _set_console_window_size() -> None:
     if sys.platform != "win32" or not sys.stdout.isatty():
         return
+    from vynex_vpn_client.constants import DEFAULT_CONSOLE_COLUMNS, DEFAULT_CONSOLE_LINES
+
     try:
         os.system(f"mode con cols={DEFAULT_CONSOLE_COLUMNS} lines={DEFAULT_CONSOLE_LINES} > nul")
     except Exception:
         pass
 
 
+def main() -> int:
+    entrypoint = _load_entrypoint()
+    return int(entrypoint())
+
+
 if __name__ == "__main__":
-    _set_console_window_size()
-    _set_console_title()
+    if _is_legacy_terminal_requested():
+        _set_console_window_size()
+        _set_console_title()
     raise SystemExit(main())

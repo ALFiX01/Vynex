@@ -6,7 +6,7 @@ from typing import Any
 from .models import ServerEntry
 
 _SUPPORTED_XRAY_OUTBOUND_PROTOCOLS = frozenset({"vless", "vmess", "trojan", "shadowsocks"})
-_SUPPORTED_XRAY_NETWORKS = frozenset({"tcp", "ws", "grpc"})
+_SUPPORTED_XRAY_NETWORKS = frozenset({"tcp", "ws", "grpc", "xhttp", "splithttp", "split-http"})
 _SUPPORTED_XRAY_SECURITIES = frozenset({"none", "tls", "reality"})
 
 
@@ -163,6 +163,8 @@ def _parse_outbound(
 
 def _parse_stream_settings(stream_settings: dict[str, Any]) -> dict[str, Any]:
     network = str(stream_settings.get("network") or "tcp").strip().lower()
+    if network in {"splithttp", "split-http"}:
+        network = "xhttp"
     security = str(stream_settings.get("security") or "none").strip().lower()
     if network not in _SUPPORTED_XRAY_NETWORKS:
         raise ValueError(f"unsupported embedded protocol: Xray network '{network}' is not supported.")
@@ -213,6 +215,16 @@ def _parse_stream_settings(stream_settings: dict[str, Any]) -> dict[str, Any]:
             extra["service_name"] = str(grpc_settings["serviceName"])
         if grpc_settings.get("authority"):
             extra["authority"] = str(grpc_settings["authority"])
+    elif network == "xhttp":
+        xhttp_settings = dict(stream_settings.get("xhttpSettings") or {})
+        if xhttp_settings.get("path"):
+            extra["path"] = str(xhttp_settings["path"])
+        if xhttp_settings.get("host"):
+            extra["host"] = str(xhttp_settings["host"])
+        if xhttp_settings.get("mode"):
+            extra["mode"] = str(xhttp_settings["mode"])
+        if isinstance(xhttp_settings.get("extra"), dict):
+            extra["xhttp_extra"] = xhttp_settings["extra"]
     else:
         tcp_settings = dict(stream_settings.get("tcpSettings") or {})
         header = dict(tcp_settings.get("header") or {})

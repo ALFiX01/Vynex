@@ -109,6 +109,7 @@ def terminate_running_processes(
     managed_processes: list[psutil.Process] = []
     process_info_by_pid: dict[int, RunningProcessDetails] = {}
     failed_by_pid: dict[int, RunningProcessDetails] = {}
+    fallback_by_pid: dict[int, RunningProcessDetails] = {}
 
     for process_info in processes:
         try:
@@ -117,7 +118,7 @@ def terminate_running_processes(
         except psutil.NoSuchProcess:
             continue
         except (psutil.AccessDenied, psutil.ZombieProcess, OSError):
-            failed_by_pid[process_info.pid] = process_info
+            fallback_by_pid[process_info.pid] = process_info
             continue
         if actual_name and actual_name.casefold() != process_info.name.casefold():
             continue
@@ -131,7 +132,7 @@ def terminate_running_processes(
         except psutil.NoSuchProcess:
             continue
         except (psutil.AccessDenied, psutil.ZombieProcess, OSError):
-            failed_by_pid[process.pid] = process_info_by_pid[process.pid]
+            fallback_by_pid[process.pid] = process_info_by_pid[process.pid]
             continue
         pending_processes.append(process)
 
@@ -144,15 +145,78 @@ def terminate_running_processes(
         except psutil.NoSuchProcess:
             continue
         except (psutil.AccessDenied, psutil.ZombieProcess, OSError):
-            failed_by_pid[process.pid] = process_info_by_pid[process.pid]
+            fallback_by_pid[process.pid] = process_info_by_pid[process.pid]
             continue
         retry_processes.append(process)
 
     _, still_alive = _wait_for_processes(retry_processes, timeout=max(kill_timeout, 0.0))
     for process in still_alive:
-        failed_by_pid[process.pid] = process_info_by_pid[process.pid]
+        fallback_by_pid[process.pid] = process_info_by_pid[process.pid]
+
+    for pid, process_info in fallback_by_pid.items():
+        if not _terminate_process_tree_with_taskkill(
+            process_info,
+            timeout=max(timeout, 0.0),
+            kill_timeout=max(kill_timeout, 0.0),
+        ):
+            failed_by_pid[pid] = process_info
 
     return sorted(failed_by_pid.values(), key=lambda item: (item.name.casefold(), item.pid))
+
+
+def _terminate_process_tree_with_taskkill(
+    process_info: RunningProcessDetails,
+    *,
+    timeout: float,
+    kill_timeout: float,
+) -> bool:
+    if not _is_running_process_match(process_info):
+        return True
+    _run_taskkill(process_info.pid, force=False)
+    if _wait_for_running_process_exit(process_info, timeout=timeout):
+        return True
+    _run_taskkill(process_info.pid, force=True)
+    return _wait_for_running_process_exit(process_info, timeout=kill_timeout)
+
+
+def _run_taskkill(pid: int, *, force: bool) -> None:
+    command = ["taskkill", "/PID", str(pid), "/T"]
+    if force:
+        command.append("/F")
+    try:
+        subprocess.run(
+            command,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=_powershell_creationflags(),
+        )
+    except (OSError, ValueError):
+        return
+
+
+def _wait_for_running_process_exit(process_info: RunningProcessDetails, *, timeout: float) -> bool:
+    deadline = time.monotonic() + max(timeout, 0.0)
+    while True:
+        if not _is_running_process_match(process_info):
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return not _is_running_process_match(process_info)
+        time.sleep(min(0.1, remaining))
+
+
+def _is_running_process_match(process_info: RunningProcessDetails) -> bool:
+    try:
+        process = psutil.Process(process_info.pid)
+        actual_name = str(process.name() or "").strip()
+    except psutil.NoSuchProcess:
+        return False
+    except (psutil.AccessDenied, psutil.ZombieProcess, OSError):
+        return is_process_running(process_info.pid)
+    if actual_name and actual_name.casefold() != process_info.name.casefold():
+        return False
+    return process.is_running()
 
 
 def _wait_for_processes(

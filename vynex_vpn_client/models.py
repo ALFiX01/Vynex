@@ -35,6 +35,21 @@ def _normalize_extra_fields(payload: dict[str, Any] | None) -> dict[str, Any]:
     return dict(payload or {})
 
 
+def _coerce_stored_bool(value: Any, *, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+        return default
+    if isinstance(value, int):
+        return bool(value)
+    return default
+
+
 def _validate_base64_key(field_name: str, value: str) -> str:
     normalized = value.strip()
     if not normalized:
@@ -529,7 +544,7 @@ class RuntimeState:
             mode=data.get("mode"),
             server_id=data.get("server_id"),
             started_at=data.get("started_at"),
-            system_proxy_enabled=bool(data.get("system_proxy_enabled", False)),
+            system_proxy_enabled=_coerce_stored_bool(data.get("system_proxy_enabled"), default=False),
             previous_system_proxy=data.get("previous_system_proxy"),
             routing_profile_id=data.get("routing_profile_id"),
             routing_profile_name=data.get("routing_profile_name"),
@@ -586,7 +601,10 @@ class AppSettings:
     def from_dict(cls, data: dict[str, Any]) -> "AppSettings":
         return cls(
             active_routing_profile_id=data.get("active_routing_profile_id", "default"),
-            set_system_proxy=bool(data.get("set_system_proxy", True)),
+            set_system_proxy=_coerce_stored_bool(data.get("set_system_proxy"), default=True),
             connection_mode=str(data.get("connection_mode", "PROXY") or "PROXY"),
-            auto_update_subscriptions_on_startup=bool(data.get("auto_update_subscriptions_on_startup", False)),
+            auto_update_subscriptions_on_startup=_coerce_stored_bool(
+                data.get("auto_update_subscriptions_on_startup"),
+                default=False,
+            ),
         )

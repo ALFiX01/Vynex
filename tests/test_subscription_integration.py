@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 from unittest.mock import Mock, patch
+from urllib.parse import quote
 
 from vynex_vpn_client.app import VynexVpnApp
 from vynex_vpn_client.models import ServerEntry, SubscriptionEntry
@@ -45,6 +46,41 @@ def test_parse_server_entries_supports_urlsafe_base64_bundle() -> None:
     assert servers[0].extra["public_key"] == "KEY"
     assert servers[0].extra["short_id"] == "SID"
     assert servers[0].extra["fingerprint"] == "chrome"
+
+
+def test_parse_server_entries_supports_crlf_wrapped_base64_bundle() -> None:
+    payload = "\r\n".join(
+        [
+            "vless://id-1@example.com:443?type=tcp#One",
+            "vless://id-2@example.com:8443?type=tcp#Two",
+        ]
+    )
+    encoded = base64.b64encode(payload.encode("utf-8")).decode("ascii")
+    wrapped = "\r\n".join(encoded[index : index + 24] for index in range(0, len(encoded), 24))
+
+    servers = parse_server_entries(wrapped)
+
+    assert [server.name for server in servers] == ["One", "Two"]
+
+
+def test_parse_share_link_treats_uri_scheme_as_case_insensitive() -> None:
+    vmess_payload = {
+        "add": "vmess.example.com",
+        "port": "443",
+        "id": "uuid",
+        "ps": "VMess",
+    }
+    vmess_encoded = base64.b64encode(json.dumps(vmess_payload).encode("utf-8")).decode("ascii")
+    ss_credentials = base64.b64encode(b"aes-128-gcm:secret").decode("ascii")
+
+    vmess = parse_share_link(f"VMESS://{vmess_encoded}")
+    shadowsocks = parse_share_link(f"SS://{ss_credentials}@ss.example.com:8388#Shadow")
+
+    assert vmess.protocol == "vmess"
+    assert vmess.host == "vmess.example.com"
+    assert shadowsocks.protocol == "ss"
+    assert shadowsocks.extra["method"] == "aes-128-gcm"
+    assert shadowsocks.extra["password"] == "secret"
 
 
 def test_parse_server_entries_supports_clash_json() -> None:
@@ -99,6 +135,27 @@ def test_parse_share_link_supports_reality_vless_with_emoji_fragment() -> None:
     assert server.extra["short_id"] == "fc"
     assert server.extra["fingerprint"] == "chrome"
     assert server.extra["spider_x"] == "/"
+
+
+def test_parse_share_link_supports_reality_xhttp_settings() -> None:
+    xhttp_extra = quote(json.dumps({"xmux": {"maxConcurrency": "1-2"}}, separators=(",", ":")))
+    link = (
+        "vless://6ef40d01-fc7c-4ccf-ba96-bb659b92f6d8@185.80.91.169:443"
+        "?encryption=none&fp=chrome&host=edge.example.com&mode=packet-up"
+        "&path=%2Fxhttp&pbk=vZCRu2nZ7v7diSX2Zv7sOoFM2ESufvAyFwt0Bw9pJSc"
+        f"&security=reality&sid=fc&sni=sosok.vk.com&type=xhttp&extra={xhttp_extra}"
+        "#Reality%20XHTTP"
+    )
+
+    server = parse_share_link(link)
+
+    assert server.protocol == "vless"
+    assert server.extra["network"] == "xhttp"
+    assert server.extra["path"] == "/xhttp"
+    assert server.extra["host"] == "edge.example.com"
+    assert server.extra["mode"] == "packet-up"
+    assert server.extra["xhttp_extra"] == {"xmux": {"maxConcurrency": "1-2"}}
+    assert server.extra["security"] == "reality"
 
 
 def test_parse_share_link_supports_wrapped_reality_vless() -> None:

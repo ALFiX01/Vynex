@@ -193,6 +193,58 @@ def test_parse_server_entries_imports_default_xray_from_vpn_uri() -> None:
     assert default_connection["source_container"] == "amnezia-xray"
 
 
+def test_parse_server_entries_imports_xray_xhttp_settings() -> None:
+    payload = {
+        "outbounds": [
+            {
+                "tag": "Reality XHTTP",
+                "protocol": "vless",
+                "settings": {
+                    "vnext": [
+                        {
+                            "address": "xray.example.com",
+                            "port": 443,
+                            "users": [
+                                {
+                                    "id": "11111111-1111-1111-1111-111111111111",
+                                    "encryption": "none",
+                                }
+                            ],
+                        }
+                    ]
+                },
+                "streamSettings": {
+                    "network": "xhttp",
+                    "security": "reality",
+                    "realitySettings": {
+                        "serverName": "reality.example.com",
+                        "fingerprint": "chrome",
+                        "publicKey": "REALITYPUB",
+                        "shortId": "abcd1234",
+                    },
+                    "xhttpSettings": {
+                        "host": "edge.example.com",
+                        "path": "/xhttp",
+                        "mode": "packet-up",
+                        "extra": {"xmux": {"maxConcurrency": "1-2"}},
+                    },
+                },
+            }
+        ],
+    }
+
+    servers = parse_server_entries(json.dumps(payload))
+
+    assert len(servers) == 1
+    server = servers[0]
+    assert server.extra["network"] == "xhttp"
+    assert server.extra["path"] == "/xhttp"
+    assert server.extra["host"] == "edge.example.com"
+    assert server.extra["mode"] == "packet-up"
+    assert server.extra["xhttp_extra"] == {"xmux": {"maxConcurrency": "1-2"}}
+    assert server.extra["public_key"] == "REALITYPUB"
+
+
 def test_app_detect_import_target_accepts_vpn_uri() -> None:
     app = object.__new__(VynexVpnApp)
     uri = _build_vpn_uri(_sample_vpn_container())

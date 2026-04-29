@@ -54,6 +54,17 @@ def test_autodetect_base64() -> None:
     assert all(server.protocol == "vless" for server in servers)
 
 
+def test_autodetect_crlf_wrapped_base64() -> None:
+    payload = "\r\n".join(_vless(index) for index in range(1, 3))
+    encoded = base64.b64encode(payload.encode("utf-8")).decode("ascii")
+    wrapped = "\r\n".join(encoded[index : index + 24] for index in range(0, len(encoded), 24))
+
+    servers = _auto_parse(wrapped)
+
+    assert len(servers) == 2
+    assert [server.name for server in servers] == ["Server-1", "Server-2"]
+
+
 def test_autodetect_url_safe_base64() -> None:
     payload = _vless(1)
     encoded = _urlsafe_encoded_text(payload)

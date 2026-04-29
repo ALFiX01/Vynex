@@ -23,7 +23,7 @@ SUPPORTED_SHARE_LINK_PREFIXES = (
     "hy2://",
     "hysteria2://",
 )
-_BASE64_BODY_RE = re.compile(r"[A-Za-z0-9+/=\-_\n]+")
+_BASE64_BODY_RE = re.compile(r"[A-Za-z0-9+/=\-_\r\n]+")
 _SINGBOX_SKIP_TYPES = {"direct", "block", "dns", "selector", "urltest"}
 _CLASH_SUPPORTED_TYPES = {"vless", "vmess", "trojan", "ss", "hy2", "hysteria2"}
 _PASTE_ARTIFACTS = "\ufeff\u200b\u200c\u200d\u2060\xa0"
@@ -220,6 +220,16 @@ def _parse_standard(link: str, *, source: str, subscription_id: str | None) -> S
             return default
         return values[-1]
 
+    def _json_param(name: str) -> dict[str, Any] | None:
+        raw_value = url_decode(_param(name))
+        if not raw_value:
+            return None
+        try:
+            decoded = json.loads(raw_value)
+        except json.JSONDecodeError:
+            return None
+        return decoded if isinstance(decoded, dict) else None
+
     protocol = parsed.scheme.lower()
     credential = parsed.username or _param("password")
     if not credential:
@@ -245,6 +255,8 @@ def _parse_standard(link: str, *, source: str, subscription_id: str | None) -> S
         "spider_x": url_decode(_param("spx")),
         "service_name": url_decode(_param("serviceName")),
         "authority": url_decode(_param("authority")),
+        "mode": _param("mode"),
+        "xhttp_extra": _json_param("extra"),
         "header_type": _param("headerType"),
         "allow_insecure": _param("allowInsecure", "false"),
     }
@@ -383,7 +395,7 @@ def _parse_hysteria2_port_spec(value: str | None) -> tuple[int, list[str] | None
 
 
 def _parse_vmess(link: str, *, source: str, subscription_id: str | None) -> ServerEntry:
-    decoded = base64.b64decode(link.removeprefix("vmess://").strip() + "==", altchars=b"-_").decode("utf-8")
+    decoded = base64.b64decode(_uri_body(link).strip() + "==", altchars=b"-_").decode("utf-8")
     data = json.loads(decoded)
     host = data.get("add")
     port = int(data.get("port"))
@@ -421,7 +433,7 @@ def _parse_vmess(link: str, *, source: str, subscription_id: str | None) -> Serv
 
 
 def _parse_shadowsocks(link: str, *, source: str, subscription_id: str | None) -> ServerEntry:
-    body = link.removeprefix("ss://")
+    body = _uri_body(link)
     body_without_fragment = body.split("#", 1)[0]
     body_without_query = body_without_fragment.split("?", 1)[0]
     name = unquote(body.split("#", 1)[1]) if "#" in body else ""
@@ -456,6 +468,10 @@ def _parse_shadowsocks(link: str, *, source: str, subscription_id: str | None) -
         source=source,
         subscription_id=subscription_id,
     )
+
+
+def _uri_body(uri: str) -> str:
+    return uri.split("://", 1)[1] if "://" in uri else uri
 
 
 def _parse_json(body: str, *, source: str, subscription_id: str | None) -> list[ServerEntry]:

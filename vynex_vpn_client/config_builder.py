@@ -334,6 +334,8 @@ class XrayConfigBuilder:
         outbound_interface_name: str | None = None,
     ) -> dict[str, Any]:
         normalized_network = (network or "tcp").lower()
+        if normalized_network in {"splithttp", "split-http"}:
+            normalized_network = "xhttp"
         normalized_security = (security or "none").lower()
         stream_settings: dict[str, Any] = {
             "network": normalized_network,
@@ -373,6 +375,15 @@ class XrayConfigBuilder:
             if extra.get("authority"):
                 grpc_settings["authority"] = extra["authority"]
             stream_settings["grpcSettings"] = grpc_settings
+        elif normalized_network == "xhttp":
+            xhttp_settings: dict[str, Any] = {"path": extra.get("path") or "/"}
+            if extra.get("host"):
+                xhttp_settings["host"] = extra["host"]
+            if extra.get("mode"):
+                xhttp_settings["mode"] = extra["mode"]
+            if isinstance(extra.get("xhttp_extra"), dict):
+                xhttp_settings["extra"] = extra["xhttp_extra"]
+            stream_settings["xhttpSettings"] = xhttp_settings
         elif normalized_network == "tcp" and extra.get("header_type") and extra["header_type"] != "none":
             stream_settings["tcpSettings"] = {"header": {"type": extra["header_type"]}}
         if outbound_interface_name:

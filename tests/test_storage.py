@@ -77,6 +77,20 @@ def test_settings_persist_auto_update_subscriptions_on_startup(tmp_path: Path, m
     assert storage.load_settings() == updated
 
 
+def test_models_parse_string_boolean_fields_without_truthiness_trap() -> None:
+    settings = AppSettings.from_dict(
+        {
+            "set_system_proxy": "false",
+            "auto_update_subscriptions_on_startup": "false",
+        }
+    )
+    runtime_state = RuntimeState.from_dict({"system_proxy_enabled": "false"})
+
+    assert settings.set_system_proxy is False
+    assert settings.auto_update_subscriptions_on_startup is False
+    assert runtime_state.system_proxy_enabled is False
+
+
 def test_upsert_servers_loads_and_saves_once_for_batch_import(tmp_path: Path, monkeypatch) -> None:
     _configure_storage_paths(tmp_path, monkeypatch)
     storage = JsonStorage()
